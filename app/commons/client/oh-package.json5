@@ -1,0 +1,11 @@
+{
+  "name": "@qaqh/client",
+  "version": "1.0.0",
+  "description": "QAQ-Harness Ringing v2 connection layer for HarmonyOS clients.",
+  "main": "src/main/ets/Index.ets",
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@qaqh/protocol": "file:../protocol"
+  }
+}

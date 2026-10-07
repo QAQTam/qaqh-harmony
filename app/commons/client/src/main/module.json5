@@ -1,0 +1,9 @@
+{
+  "module": {
+    "name": "client",
+    "type": "har",
+    "deviceTypes": [
+      "phone"
+    ]
+  }
+}
