@@ -1,0 +1,32 @@
+# 依赖与构建产物
+node_modules/
+pnpm-store/
+.hvigor/
+**/oh_modules/
+**/build/
+**/.test/
+**/target/
+.cxx/
+*.hap
+*.app
+*.har
+
+# 本地工具链与外部文档缓存（scripts/docs.py 可重新生成 .docs/）
+command-line-tools/
+commandline-tools-*/
+*.zip
+.docs/
+
+# 环境与 IDE
+local.properties
+.idea/
+.DS_Store
+*.log
+
+# 真机私有配置（签名、设备标识）
+# 本机调试签名材料（绝对路径 + 口令），IDE 自动生成，见 app/build-profile.json5.example
+/app/build-profile.json5
+*.p12
+*.cer
+*.p7b
+*.csr

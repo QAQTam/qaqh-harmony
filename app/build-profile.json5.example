@@ -1,0 +1,76 @@
+// 本机签名配置模板。
+//
+// app/build-profile.json5 存的是 IDE 自动生成的**本机调试签名材料**（.p12/.cer/.p7b
+// 的绝对路径 + 加密口令），换一台机器就失效，所以不入库。
+// 上手第一步：
+//   cp app/build-profile.json5.example app/build-profile.json5
+// 然后用 DevEco Studio 打开 app/ 目录，File > Project Structure > Signing Configs
+// 勾 Automatically generate signature，IDE 会把 material 段填回本地文件；
+// 命令行出包前需要先完成这一步，否则 assembleHap 产物未签名、hdc 装不上。
+{
+  app: {
+    // signingConfigs 留空 = 未签名。由 IDE 在本机填入，勿提交回仓库。
+    signingConfigs: [],
+    products: [
+      {
+        name: 'default',
+        // IDE 生成签名配置后会把这里改成 'default'（与上面 signingConfigs.name 同名）。
+        targetSdkVersion: '26.0.0',
+        compatibleSdkVersion: '6.1.1(24)',
+        runtimeOS: 'HarmonyOS',
+        buildOption: {
+          strictMode: {
+            caseSensitiveCheck: true,
+            useNormalizedOHMUrl: true,
+          },
+        },
+      },
+    ],
+    buildModeSet: [
+      {
+        name: 'debug',
+      },
+      {
+        name: 'release',
+      },
+    ],
+  },
+  modules: [
+    {
+      name: 'protocol',
+      srcPath: './commons/protocol',
+      targets: [
+        {
+          name: 'default',
+          applyToProducts: [
+            'default',
+          ],
+        },
+      ],
+    },
+    {
+      name: 'entry',
+      srcPath: './entry',
+      targets: [
+        {
+          name: 'default',
+          applyToProducts: [
+            'default',
+          ],
+        },
+      ],
+    },
+    {
+      name: 'client',
+      srcPath: './commons/client',
+      targets: [
+        {
+          name: 'default',
+          applyToProducts: [
+            'default',
+          ],
+        },
+      ],
+    },
+  ],
+}
