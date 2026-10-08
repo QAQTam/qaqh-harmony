@@ -281,13 +281,20 @@ export class AppModel {
     this.probe.start();
     const store: DaemonAccessStore = new DaemonAccessStore(context);
     this.accessStore = store;
-    this.put(QaqhState.BASE_URL, 'https://60.0.0.65:64413');
+    // daemon 地址一律由配对/设置页写入，不预置任何默认值：内网地址写进源码
+    // 会随构建产物分发，且残留值会让"当前地址"看起来已经配置好。
+    this.put(QaqhState.BASE_URL, '');
     this.put(QaqhState.STATUS, '未连接');
     store.prime().then(() => {
       const trust: TrustSettings = store.loadTrust();
       this.put(QaqhState.CA_PEM, trust.caCertPem);
       this.put(QaqhState.SKIP_VERIFY, trust.skipVerify);
       this.paired = store.loadDevice();
+      // 冷启回灌已配对凭证里的地址：地址不再有源码默认值，不回灌就得每次手填
+      // （activeToken 也要求两边地址一致，否则静默自连不会触发）。
+      if (this.paired !== undefined && this.text(QaqhState.BASE_URL).trim().length === 0) {
+        this.put(QaqhState.BASE_URL, this.paired.baseUrl);
+      }
       this.refreshPairedLabel();
       // 开屏引导（M14）：没有已配对凭证 = 首屏落在扫码/手动配对，不进主壳。
       this.put(QaqhState.ONBOARD, this.paired === undefined);
