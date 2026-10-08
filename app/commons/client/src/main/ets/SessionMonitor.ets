@@ -86,7 +86,8 @@ export class SessionMonitor {
 
   /**
    * 开始监视。带 sessionId = 固定会话；不带 = 自动发现模式（轮询
-   * session.list,优先 running、其次 updated_at 最新，会话切换时重建流）。
+   * session.list，在可展示会话里优先 running、其次 updated_at 最新，
+   * 会话切换时重建流）。归档与子代理临时会话由 pickPreferredSession 排除。
    */
   async start(sessionId?: string): Promise<void> {
     if (sessionId === undefined || sessionId.length === 0) {
@@ -219,6 +220,12 @@ export class SessionMonitor {
       return;
     }
     this.setStatus(MonitorStatus.RENEGOTIATING);
+    if (this.stream !== undefined) {
+      // 先解武装再关租约：留着的退避/看门狗下一拍会在 CLOSED 的 client 上
+      // 组装端点，而那是 setTimeout 回调——异常外抛会杀掉整个进程。
+      this.stream.stop();
+      this.stream = undefined;
+    }
     if (this.client.stateValue() === RingingClientState.OPEN) {
       this.client.close();
     }
@@ -253,8 +260,17 @@ export class SessionMonitor {
     this.scheduleRenegotiation();
   }
 
+  /**
+   * @internal 仅由 MonitorPump 调用。到点重连时 client 已不在 open（续期判死
+   * 或本端已 close）：EventStream 已自行停止，走同一条重新协商循环恢复。
+   */
+  onStreamLeaseUnavailable(): void {
+    this.scheduleRenegotiation();
+  }
+
   /** @internal 仅由 MonitorPump 调用。 */
   onStreamHttpDisconnect(status: number): void {
+
     if (this.stopped) {
       return;
     }
@@ -305,6 +321,10 @@ class MonitorPump implements EventStreamListener {
 
   onStreamTerminated(terminated: RingingV2StreamTerminated): void {
     this.owner.onStreamTerminated(terminated);
+  }
+
+  onLeaseUnavailable(): void {
+    this.owner.onStreamLeaseUnavailable();
   }
 
   onProtocolError(error: ProtocolError): void {

@@ -988,8 +988,8 @@ export class TranscriptModel {
       row.toolState = tool !== undefined ? tool.state : TimelineToolState.PREPARED;
       row.target = tool !== undefined
         ? toolTarget(tool.name, tool.summary, tool.argsText) : '';
-      row.argsText = TranscriptModel.capToolBody(tool !== undefined ? tool.argsText : '');
-      row.outputText = TranscriptModel.capToolBody(tool !== undefined ? tool.output : '');
+      row.argsText = TranscriptModel.washToolBody(tool !== undefined ? tool.argsText : '');
+      row.outputText = TranscriptModel.washToolBody(tool !== undefined ? tool.output : '');
       row.errorText = tool !== undefined && tool.failure !== undefined
         ? `${tool.failure.code}: ${tool.failure.message}` : '';
       row.progressText = block.progress;
@@ -1030,6 +1030,77 @@ export class TranscriptModel {
   private static capToolBody(body: string): string {
     return body.length > MAX_TOOL_BODY_CHARS
       ? `${body.substring(0, MAX_TOOL_BODY_CHARS)}\n……（余下已省略）` : body;
+  }
+
+  /**
+   * 工具正文入库前清洗（每条只做一次，之后的预览/展开不再重复处理，否则
+   * 二次展开会把 `\\n` 这种合法内容啃掉）：剥 exec 信封 → 截断 → 展开转义残留
+   * → CRLF 归一（Windows 工具输出与 JSON 信封解出来都是 `\r\n`，留着会让
+   * 行计数在行尾带上游离 `\r`）。
+   */
+  private static washToolBody(body: string): string {
+    if (body.length === 0) {
+      return body;
+    }
+    return TranscriptModel.unescapeToolText(
+      TranscriptModel.capToolBody(TranscriptModel.unwrapOutputEnvelope(body)))
+      .replace(/\r\n?/g, '\n');
+  }
+
+  /** exec/命令类回包是 JSON 信封，真正文在 `output` 字段里（且又套了一层转义）。 */
+  private static unwrapOutputEnvelope(body: string): string {
+    if (body.charAt(0) !== '{') {
+      return body;
+    }
+    try {
+      const parsed = JSON.parse(body) as Record<string, Object>;
+      const inner: Object | undefined = parsed['output'];
+      if (typeof inner === 'string') {
+        return inner;
+      }
+    } catch (error) {
+      void (error as Error); // 不是 JSON 信封：原样交给下一步
+    }
+    return body;
+  }
+
+  /**
+   * 单趟展开 `\n`/`\r\n`/`\t`/`\"`/`\/`/`\\`。逐字符走一遍而不是 replace，
+   * 是为了让 `\\n`（转义过的反斜杠 + n）保持字面量而不是被当成换行。
+   */
+  private static unescapeToolText(body: string): string {
+    if (body.indexOf('\\') < 0) {
+      return body;
+    }
+    const out: string[] = [];
+    let i: number = 0;
+    while (i < body.length) {
+      const ch: string = body.charAt(i);
+      if (ch !== '\\') {
+        out.push(ch);
+        i++;
+        continue;
+      }
+      const next: string = i + 1 < body.length ? body.charAt(i + 1) : '';
+      if (next === 'n') {
+        out.push('\n');
+        i += 2;
+      } else if (next === 'r') {
+        out.push('\n');
+        // `\r\n` 一并吃掉，别留一行空行。
+        i += body.substring(i + 2, i + 4) === '\\n' ? 4 : 2;
+      } else if (next === 't') {
+        out.push('\t');
+        i += 2;
+      } else if (next === '"' || next === '/' || next === '\\') {
+        out.push(next);
+        i += 2;
+      } else {
+        out.push(ch);
+        i++;
+      }
+    }
+    return out.join('');
   }
 
   /** 折叠预览：进行态取尾（滚动窗口），终态取头；展开态给全文。 */

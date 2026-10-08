@@ -42,6 +42,11 @@ export interface TimelineStreamListener {
   onProtocolError(error: ProtocolError): void;
   /** 租约撤销/过期（timeline 通道同款单帧终止）。 */
   onStreamTerminated(terminated: RingingV2StreamTerminated): void;
+  /**
+   * 到点重连时租约已不在 open（端点组不出来）：本流已停止。timeline 流与
+   * 投影流共用同一个 client，监视器重新协商期间它就是 CLOSED。
+   */
+  onLeaseUnavailable(): void;
 }
 
 export class TimelineStream {
@@ -115,11 +120,25 @@ export class TimelineStream {
   }
 
   private connect(): void {
+    if (this.stopped) {
+      // 陈旧回调兜底：stop() 解武装与已排程的 fire 之间存在竞态。
+      return;
+    }
+    // 与 EventStream 同款边界：connect 由 setTimeout 回调直接调用，端点组装
+    // （client 出 open 态即抛 invalid_state）外抛会被 napi 判未捕获错误杀进程。
+    let endpoint: StreamEndpoint;
+    try {
+      endpoint = this.endpointFactory();
+    } catch (error) {
+      void (error as Error);
+      this.stop();
+      this.listener.onLeaseUnavailable();
+      return;
+    }
     this.decoder = new SseDecoder();
     this.setState(this.state === TimelineStreamState.CONNECTED
       ? TimelineStreamState.CONNECTED : TimelineStreamState.CONNECTING);
     this.armWatchdog();
-    const endpoint: StreamEndpoint = this.endpointFactory();
     this.connection.connect(
       new StreamRequest(endpoint.baseUrl + timelineEventsPath(this.sessionId,
         this.cursor), endpoint.headers),

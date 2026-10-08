@@ -38,8 +38,9 @@ export class MemoryProbe {
 
   private sample(): void {
     try {
-      // d.ts 返回 bigint（字节），ArkTS 下转 Number 走 KB 口径（与 mallinfo 一致）。
-      const pssKb: number = Number(hidebug.getPss()) / 1024;
+      // 单位坑：getPss() 返回 KB（见 @ohos.hidebug d.ts），
+      // getNativeHeapAllocatedSize() 返回字节——两者统一归一到 KB 再出 MB。
+      const pssKb: number = Number(hidebug.getPss());
       const heapKb: number = Number(hidebug.getNativeHeapAllocatedSize()) / 1024;
       if (pssKb > this.peakPssKb) {
         this.peakPssKb = pssKb;
@@ -47,9 +48,11 @@ export class MemoryProbe {
       AppStorage.setOrCreate(QaqhState.PERF_PSS, MemoryProbe.mb(pssKb));
       AppStorage.setOrCreate(QaqhState.PERF_NATIVE, MemoryProbe.mb(heapKb));
       AppStorage.setOrCreate(QaqhState.PERF_PEAK, MemoryProbe.mb(this.peakPssKb));
+      // hilog 的可变参数不透传 `%f`（真机上三项全打印成 `}f`，数字丢失），
+      // 统一先转成字符串走 %{public}s。
       hilog.info(HILOG_DOMAIN, HILOG_TAG,
-        'pss=%{public}fMB nativeHeap=%{public}fMB peakPss=%{public}fMB',
-        pssKb / 1024, heapKb / 1024, this.peakPssKb / 1024);
+        'pss=%{public}s nativeHeap=%{public}s peakPss=%{public}s (MB)',
+        MemoryProbe.mb(pssKb), MemoryProbe.mb(heapKb), MemoryProbe.mb(this.peakPssKb));
     } catch (error) {
       // 环境不支持：停表静默退出（探针永远不能成为新的故障面）。
       void (error as Error);

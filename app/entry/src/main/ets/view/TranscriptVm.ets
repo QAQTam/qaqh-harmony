@@ -126,12 +126,22 @@ export class RowsDataSource implements IDataSource {
   private listeners: DataChangeListener[] = [];
   private model: TranscriptModel | undefined;
   private lastStructural: number = -1;
+  private generationValue: number = 0;
 
   attach(model: TranscriptModel | undefined): void {
     this.model = model;
     this.lastStructural = -1;
     this.rows = [];
     this.vmById.clear();
+    this.generationValue++;
+  }
+
+  /**
+   * attach 代号（冷启动/切会话/重建监视流都会 +1）。视图据此区分
+   * 「新表」与「同表长高」：前者要重新锚到最新一条，后者只在贴末尾时跟随。
+   */
+  generation(): number {
+    return this.generationValue;
   }
 
   totalCount(): number {
@@ -153,11 +163,11 @@ export class RowsDataSource implements IDataSource {
       (item: DataChangeListener) => item !== listener);
   }
 
-  /** 同步一次；返回是否发生结构重建（供滚动跟随决策）。 */
-  sync(): boolean {
+  /** 同步一次：结构变化整表换引用，逐字增量只抄脏行。 */
+  sync(): void {
     const model = this.model;
     if (model === undefined) {
-      return false;
+      return;
     }
     if (model.structuralVersion() !== this.lastStructural) {
       const rows = model.rowsRef();
@@ -186,7 +196,7 @@ export class RowsDataSource implements IDataSource {
       this.rows = next;
       this.lastStructural = model.structuralVersion();
       this.notifyDataReload();
-      return true;
+      return;
     }
     for (const row of model.drainDirty()) {
       const vm: RowVm | undefined = this.vmById.get(row.rowId);
@@ -194,7 +204,6 @@ export class RowsDataSource implements IDataSource {
         vm.syncFrom(row);
       }
     }
-    return false;
   }
 
   /** 行是否存在（调试/测试用）。 */

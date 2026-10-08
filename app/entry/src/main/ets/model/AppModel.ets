@@ -27,9 +27,11 @@ import {
   RingingV2CommandAck,
   RingingV2CommandEnvelope, RingingV2EventEnvelope, RingingV2ResetRequired,
   RingingV2StreamTerminated, TimelineEntry, TimelineSnapshotResponse, ToolCommands,
+  visibleSessions,
   RingingApprovalsSnapshot, newCommandId
 } from '@qaqh/protocol';
 import { common } from '@kit.AbilityKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { DaemonAccessStore, PairedDevice, TrustSettings } from '../config/DaemonAccessStore';
 import { PreferencesCursorStore } from '../cursor/PreferencesCursorStore';
@@ -46,6 +48,9 @@ export { QaqhState };
 
 /** 列表轮询节拍（对齐 SessionMonitor 自动发现：15s）。 */
 const LIST_POLL_MS: number = 15000;
+/** hilog 出口（同 MemoryProbe 配方）：wire 漂移一条不落，但每进程只响一次。 */
+const HILOG_DOMAIN: number = 0x0;
+const HILOG_TAG: string = 'QaqhWire';
 /** 正文快照一页的回合数（对齐 webui 的 SNAPSHOT_LIMIT）。 */
 const TRANSCRIPT_PAGE_LIMIT: number = 50;
 /** 流式渲染合并节拍（M8 契约：一个窗口内的多条 delta 渲一次）。 */
@@ -132,6 +137,10 @@ class LambdaTimelineListener implements TimelineStreamListener {
 
   onStreamTerminated(terminated: RingingV2StreamTerminated): void {
     this.statusFn(`正文流被服务端终止（${terminated.code}）`);
+  }
+
+  onLeaseUnavailable(): void {
+    this.statusFn('正文流租约失效，重新协商后自动重连');
   }
 }
 
@@ -220,6 +229,8 @@ export class AppModel {
   private livePending: PendingInteractionView[] = [];
   /** 最近一轮 session.list（卡片会话徽标的名称来源）。 */
   private listEntries: RingingSessionListEntry[] = [];
+  /** 表外键已告警过（15s 一轮，不刷屏）。 */
+  private wireDriftNoted: boolean = false;
   /** 实况窗回合胶囊的本地边沿标记（与 AppStorage TURN_ACTIVE 解耦，防漏 flip）。 */
   private turnLiveShown: boolean = false;
   private notifier: ApprovalNotifier = new ApprovalNotifier('com.qaqh.harmony',
@@ -532,19 +543,42 @@ export class AppModel {
       return client.open().then((): void => undefined);
     };
     ensureOpen().then(() => client.sessionList()).then((entries: RingingSessionListEntry[]) => {
+      // 全量留底：徽标/模型名按 sessionId 反查，归档会话也要认得出名字。
       this.listEntries = entries;
-      this.put(QaqhState.SESSION_ENTRIES, entries);
+      this.noteWireDrift(entries);
+      // 后端不过滤归档与临时（子代理）会话，活跃面在端侧滤——UI 只吃这一份。
+      const visible: RingingSessionListEntry[] = visibleSessions(entries);
+      this.put(QaqhState.SESSION_ENTRIES, visible);
       if (this.text(QaqhState.STATUS).startsWith('已连接')) {
-        this.statusText(`已连接（${entries.length} 个会话）`);
+        this.statusText(`已连接（${visible.length} 个会话）`);
       }
       // 运行中会话集合变化 → 聚合轮询目标跟着增删（fire-and-forget）。
-      this.syncApprovalTargets(entries);
+      this.syncApprovalTargets(visible);
     }).catch((error: Error) => {
       // 轮询失败不终止：lease 重开/网络抖动由下一轮兜底。
       void error;
     }).then(() => {
       pollAgain();
     });
+  }
+
+  /**
+   * 键表外的 session.list 字段落一条 hilog。解析器宽容是对的（后端加法式演进
+   * 不该让手机报错），静默不是：手抄件的失败模式是「某个功能永远显示缺省值」，
+   * 没人发现。响一次，剩下的交给契约测试与协议层键表。
+   */
+  private noteWireDrift(entries: RingingSessionListEntry[]): void {
+    if (this.wireDriftNoted) {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.unmodeledKeys.length > 0) {
+        this.wireDriftNoted = true;
+        hilog.warn(HILOG_DOMAIN, HILOG_TAG,
+          `session.list 键表外字段：${entry.unmodeledKeys.join(',')}`);
+        return;
+      }
+    }
   }
 
   /** 创建会话：control 频道 session_create（唯一允许无 session_id 的命令）。 */
@@ -738,6 +772,13 @@ export class AppModel {
       this.statusText('拉取快照…');
     } else if (status === MonitorStatus.RENEGOTIATING) {
       this.statusText('租约失效，重新协商…');
+      // 正文流与监视器共用一个 client：client 一出 open 态，它自己那条重连定时器
+      // 到点就会撞 requireOpen。先解武装，下一次 bootstrap 负责重建
+      // （onBootstrap → loadTranscript → startTimelineStream）。
+      if (this.timelineStream !== undefined) {
+        this.timelineStream.stop();
+        this.timelineStream = undefined;
+      }
     } else if (status === MonitorStatus.STOPPED) {
       this.statusText('已停止');
     }
@@ -1058,6 +1099,9 @@ export class AppModel {
    * session.list 每轮照会聚合目标：running 会话进集合（device 身份先 attach——
    * /approvals 对设备要求租约归属该会话），退出的会话连同其远程卡片清掉。
    * 当前监视会话**不进**集合：它的审批由 InteractionCenter 实时维护。
+   *
+   * 归档/临时（子代理）会话整条跳过：它们不该被手机去轮询审批，也不该在用户
+   * 看不见的会话上挂授权卡。调用方传全量或已过滤集都成立（此处谓词是准绳）。
    */
   private syncApprovalTargets(entries: RingingSessionListEntry[]): void {
     const client = this.approvalClient;
@@ -1067,7 +1111,7 @@ export class AppModel {
     const active: string = this.text(QaqhState.ACTIVE_SESSION);
     const wanted: Set<string> = new Set();
     for (const entry of entries) {
-      if (entry.running && entry.sessionId !== active) {
+      if (entry.isListable() && entry.running && entry.sessionId !== active) {
         wanted.add(entry.sessionId);
       }
     }

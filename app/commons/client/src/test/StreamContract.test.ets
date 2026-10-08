@@ -88,6 +88,11 @@ class FakeTransport implements Transport {
     return this;
   }
 
+  enqueueNetworkError(): FakeTransport {
+    this.script.push(new ScriptedReply(true, -1, ''));
+    return this;
+  }
+
   send(request: TransportRequest): Promise<TransportResponse> {
     this.requests.push(request);
     const next: ScriptedReply | undefined = this.script.shift();
@@ -201,6 +206,7 @@ class RecordingStreamListener implements EventStreamListener {
   httpDisconnects: number[] = [];
   protocolErrors: string[] = [];
   terminations: string[] = [];
+  leaseUnavailables: number = 0;
 
   onEnvelope(envelope: RingingV2EventEnvelope): void {
     this.envelopes++;
@@ -226,6 +232,10 @@ class RecordingStreamListener implements EventStreamListener {
   onStreamTerminated(terminated: RingingV2StreamTerminated): void {
     this.terminations.push(`${terminated.code}/${terminated.sessionId}`);
   }
+
+  onLeaseUnavailable(): void {
+    this.leaseUnavailables++;
+  }
 }
 
 function makeStream(connection: FakeStreamConnection, timer: FakeTimer,
@@ -236,6 +246,28 @@ function makeStream(connection: FakeStreamConnection, timer: FakeTimer,
       'Content-Type': 'application/json',
       'X-QAQH-Client-Session-Id': 'cs-1',
       'Accept': 'text/event-stream'
+    };
+    return new StreamEndpoint('http://daemon.test', headers);
+  }, listener);
+}
+
+/**
+ * 真机闪退形态：租约一失效（client 出 open 态），组装流端点就抛 invalid_state。
+ * 关 gate 复现「定时器到点时租约已经没了」。
+ */
+class LeaseGate {
+  open: boolean = true;
+}
+
+function makeGatedStream(connection: FakeStreamConnection, timer: FakeTimer,
+  listener: RecordingStreamListener, gate: LeaseGate): EventStream {
+  return new EventStream('seed-1', connection, timer, (): StreamEndpoint => {
+    if (!gate.open) {
+      throw new ProtocolError('invalid_state', 'requires open state, got closed');
+    }
+    let headers: Record<string, string> = {
+      'Authorization': 'Bearer tok-1',
+      'X-QAQH-Client-Session-Id': 'cs-1'
     };
     return new StreamEndpoint('http://daemon.test', headers);
   }, listener);
@@ -349,6 +381,27 @@ export default function streamContractTest() {
       connection.emitEnded(200);
       expect(timer.lastIntervalMs).assertEqual(1000);
       expect(stream.stateValue()).assertEqual(StreamState.RECONNECTING);
+    });
+
+    it('closed_lease_on_retry_fire_does_not_escape', 0, () => {
+      const connection: FakeStreamConnection = new FakeStreamConnection();
+      const timer: FakeTimer = new FakeTimer();
+      const listener: RecordingStreamListener = new RecordingStreamListener();
+      const gate: LeaseGate = new LeaseGate();
+      const stream: EventStream = makeGatedStream(connection, timer, listener, gate);
+      stream.start(undefined);
+
+      // 断流 → 1s 退避重连已武装；随后租约失效（client 出 open）。
+      connection.emitEnded(200);
+      gate.open = false;
+      // 定时器到点：旧实现在这里把异常抛过 setTimeout 边界 → napi 判未捕获
+      // 错误 → 框架杀进程（真机 JS_ERROR 闪退）。
+      timer.fire();
+
+      expect(listener.leaseUnavailables).assertEqual(1);
+      expect(stream.stateValue()).assertEqual(StreamState.STOPPED);
+      expect(timer.stopped).assertTrue();
+      expect(connection.connectCount()).assertEqual(1);
     });
 
     it('stops_on_http_disconnect', 0, () => {
@@ -510,6 +563,47 @@ export default function streamContractTest() {
       expect(connection.connectCount()).assertEqual(2);
     });
 
+    it('lease_loss_while_retry_armed_leaves_no_orphan_timer', 0, async () => {
+      // 生产接线是两个 timer 槽（client 续期 / 流重连+看门狗，见 AppModel），
+      // 假件必须照搬：共槽会互相顶掉排程，把闪退窗口测没。
+      const transport: FakeTransport =
+        new FakeTransport().enqueue(200, OPEN_OK).enqueue(200, bootstrapFixture())
+          .enqueueNetworkError().enqueueNetworkError().enqueueNetworkError()
+          .enqueue(200, OPEN_OK).enqueue(200, bootstrapFixture());
+      const renewTimer: FakeTimer = new FakeTimer();
+      const streamTimer: FakeTimer = new FakeTimer();
+      const connection: FakeStreamConnection = new FakeStreamConnection();
+      const listener: RecordingMonitorListener = new RecordingMonitorListener();
+      const client: RingingClient = new RingingClient(new RingingClientConfig(
+        'http://daemon.test', 'tok-1', 'instance-1', transport, renewTimer));
+      const monitor: SessionMonitor = new SessionMonitor(client, connection,
+        streamTimer, listener);
+      await monitor.start('seed-1');
+
+      connection.emitFailed();
+      const staleRetry: (() => void) | undefined = streamTimer.lastFire;
+      expect(staleRetry !== undefined).assertTrue();
+
+      // 注入三次瞬时续期失败 → leaseLost → CLOSED + 重新协商（判死阈值 3）。
+      renewTimer.fire();
+      await settle();
+      renewTimer.fire();
+      await settle();
+      renewTimer.fire();
+      await settle();
+
+      expect(transport.lastRequest().url)
+        .assertEqual('http://daemon.test/ringing/v2/sessions/seed-1/bootstrap');
+      expect(monitor.statusValue()).assertEqual(MonitorStatus.LIVE);
+      expect(connection.connectCount()).assertEqual(2);
+      expect(streamTimer.lastIntervalMs).assertEqual(15000);
+
+      // 漏网的陈旧回调只许沉默：不得外抛，也不得留下第二条流。
+      staleRetry!();
+      expect(connection.connectCount()).assertEqual(2);
+      expect(monitor.statusValue()).assertEqual(MonitorStatus.LIVE);
+    });
+
     it('renegotiates_on_stream_terminated', 0, async () => {
       const transport: FakeTransport =
         new FakeTransport().enqueue(200, OPEN_OK).enqueue(200, bootstrapFixture())
@@ -553,6 +647,10 @@ export default function streamContractTest() {
 const SESSION_LIST: string = '[{"session_id":"seed-1","updated_at":100},' +
   '{"session_id":"seed-2","updated_at":50,"running":true}]';
 
+const SESSION_LIST_WITH_ARCHIVE: string = '[{"session_id":"seed-1","updated_at":100},' +
+  '{"session_id":"arch-1","updated_at":999,"running":true,"archived":true},' +
+  '{"session_id":"sub-1","updated_at":998,"ephemeral":true}]';
+
     it('auto_discovers_running_session', 0, async () => {
       const transport: FakeTransport =
         new FakeTransport().enqueue(200, OPEN_OK).enqueue(200, SESSION_LIST)
@@ -581,6 +679,29 @@ const SESSION_LIST: string = '[{"session_id":"seed-1","updated_at":100},' +
       expect(monitor.statusValue()).assertEqual(MonitorStatus.LIVE);
       // 轮询节拍 15s。
       expect(discoveryTimer.lastIntervalMs).assertEqual(15000);
+    });
+
+    it('auto_discovery_skips_archived_and_ephemeral', 0, async () => {
+      // 后端 set_archived 会把 updated_at 刷成当下：归档那条既在跑又最新，
+      // 但手机不能去监视一个用户已经收进归档组的会话。
+      const transport: FakeTransport =
+        new FakeTransport().enqueue(200, OPEN_OK).enqueue(200, SESSION_LIST_WITH_ARCHIVE)
+          .enqueue(200, bootstrapFixture());
+      const streamTimer: FakeTimer = new FakeTimer();
+      const discoveryTimer: FakeTimer = new FakeTimer();
+      const connection: FakeStreamConnection = new FakeStreamConnection();
+      const listener: RecordingMonitorListener = new RecordingMonitorListener();
+      const client: RingingClient = new RingingClient(new RingingClientConfig(
+        'http://daemon.test', 'tok-1', 'instance-1', transport, streamTimer));
+      const monitor: SessionMonitor = new SessionMonitor(client, connection,
+        streamTimer, listener, undefined, discoveryTimer);
+
+      await monitor.start();
+
+      expect(monitor.sessionIdValue()).assertEqual('seed-1');
+      expect(connection.lastUrl()
+        .includes('/sessions/seed-1/events?since_cursor=')).assertTrue();
+      expect(monitor.statusValue()).assertEqual(MonitorStatus.LIVE);
     });
 
     it('stop_clears_store_and_disconnects', 0, async () => {

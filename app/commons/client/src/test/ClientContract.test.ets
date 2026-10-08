@@ -11,7 +11,7 @@ import { describe, it, expect } from '@ohos/hypium';
 import { ProtocolError, CanonicalCursor, CursorToken, RingingV2CommandEnvelope,
   ControlCommands } from '@qaqh/protocol';
 import { RingingClient, RingingClientConfig, RingingClientState,
-  LeaseLostReason, MAX_RENEW_FAILURES } from '../main/ets/RingingClient';
+  LeaseLostReason, MAX_RENEW_FAILURES, RENEW_REQUEST_TIMEOUT_MS } from '../main/ets/RingingClient';
 import { Transport, TransportRequest, TransportResponse,
   TransportError, LeaseTimer } from '../main/ets/transport/Transport';
 
@@ -217,6 +217,10 @@ export default function clientContractTest() {
       expect(request.body).assertEqual('');
       expect(request.headers['X-QAQH-Client-Session-Id']).assertEqual('cs-1');
       expect(request.headers['Authorization']).assertEqual('Bearer tok-1');
+      // 续期必须自带短读预算：晚到即作废（服务端 TTL 30s），不能沿用大正文
+      // 端点的 120s 传输默认（一次挂起就烧穿 TTL → 401 lease_expired）。
+      expect(request.timeoutMs).assertEqual(RENEW_REQUEST_TIMEOUT_MS);
+      expect(transport.requests[0].timeoutMs).assertEqual(0);
       expect(client.stateValue()).assertEqual(RingingClientState.OPEN);
       expect(timer.lastIntervalMs).assertEqual(5000);
       expect(timer.stopped).assertFalse();

@@ -68,7 +68,8 @@ export struct TimelineView {
   scroller: Scroller = new Scroller();
   /** 展开/折叠回调（Index 桥到 TranscriptModel.toggleExpanded）。 */
   onToggle: (rowId: string) => void = (rowId: string) => void rowId;
-  private atBottom: boolean = true;
+  /** 已锚定过哪张表（RowsDataSource.attach 代号）；-1 = 本视图还没锚定过。 */
+  private anchoredGeneration: number = -1;
 
   aboutToAppear(): void {
     // 重挂载兜底：tick @Prop 初始化不触发 @Watch，不先 sync 一次会渲成空表。
@@ -76,8 +77,24 @@ export struct TimelineView {
   }
 
   onTick(): void {
-    const reloaded: boolean = this.dataSource.sync();
-    if (reloaded && this.atBottom) {
+    this.dataSource.sync();
+    this.followTail();
+  }
+
+  /**
+   * 尾部跟随，两件事分开判：新表（冷启动/切会话/重建监视流）无条件落到最新
+   * 一条；同一张表长高时只在本来看着末尾才跟。「看着末尾」交给布局回答
+   * （isAtEnd），不再由结构版本号或可见行索引代答——末行撑高、长文、展开的
+   * 工具卡都不会因此误判。
+   */
+  private followTail(): void {
+    const generation: number = this.dataSource.generation();
+    if (this.anchoredGeneration !== generation) {
+      this.anchoredGeneration = generation;
+      this.scroller.scrollEdge(Edge.Bottom);
+      return;
+    }
+    if (this.scroller.isAtEnd()) {
       this.scroller.scrollEdge(Edge.Bottom);
     }
   }
@@ -112,10 +129,6 @@ export struct TimelineView {
     .alignListItem(ListItemAlign.Start)
     .cachedCount(8)
     .edgeEffect(EdgeEffect.Spring, { alwaysEnabled: true })
-    .onScrollIndex((first: number, last: number) => {
-      const total: number = this.dataSource.totalCount();
-      this.atBottom = total === 0 || last >= total - 2;
-    })
   }
 }
 

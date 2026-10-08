@@ -3,18 +3,25 @@
  * 与单测假件分列。M1 覆盖请求/响应形态；SSE 流式订阅在 M2 引入。
  */
 
-/** 一次 HTTP 请求的完整形态（url 为绝对地址，body 为空串表示无正文）。 */
+/**
+ * 一次 HTTP 请求的完整形态（url 为绝对地址，body 为空串表示无正文）。
+ * `timeoutMs > 0` 时是该请求自己的读超时上限（0 = 用传输层默认）。租约续期
+ * 这类「晚到即作废」的请求必须自带短预算，不能跟着大正文端点共用 120s。
+ */
 export class TransportRequest {
   readonly method: string;
   readonly url: string;
   readonly headers: Record<string, string>;
   readonly body: string;
+  readonly timeoutMs: number;
 
-  constructor(method: string, url: string, headers: Record<string, string>, body: string) {
+  constructor(method: string, url: string, headers: Record<string, string>, body: string,
+    timeoutMs?: number) {
     this.method = method;
     this.url = url;
     this.headers = headers;
     this.body = body;
+    this.timeoutMs = timeoutMs !== undefined ? timeoutMs : 0;
   }
 }
 

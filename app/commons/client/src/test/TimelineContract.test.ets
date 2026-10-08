@@ -99,6 +99,7 @@ class RecordingTimelineListener implements TimelineStreamListener {
   httpDisconnects: number[] = [];
   protocolErrors: string[] = [];
   terminations: string[] = [];
+  leaseUnavailables: number = 0;
 
   onEntry(entry: TimelineEntry, cursor: string): void {
     this.entries++;
@@ -125,6 +126,29 @@ class RecordingTimelineListener implements TimelineStreamListener {
   onStreamTerminated(terminated: RingingV2StreamTerminated): void {
     this.terminations.push(terminated.code);
   }
+
+  onLeaseUnavailable(): void {
+    this.leaseUnavailables++;
+  }
+}
+
+/** 租约开关：出 open 态后组装端点即抛 invalid_state（真机闪退的触发条件）。 */
+class LeaseGate {
+  open: boolean = true;
+}
+
+function makeGatedStream(connection: FakeStreamConnection, timer: FakeTimer,
+  listener: RecordingTimelineListener, gate: LeaseGate): TimelineStream {
+  return new TimelineStream('seed-1', connection, timer, (): StreamEndpoint => {
+    if (!gate.open) {
+      throw new ProtocolError('invalid_state', 'requires open state, got closed');
+    }
+    let headers: Record<string, string> = {
+      'Authorization': 'Bearer tok-1',
+      'X-QAQH-Client-Session-Id': 'cs-1'
+    };
+    return new StreamEndpoint('https://daemon.test', headers);
+  }, listener, 10, EPOCH);
 }
 
 function makeStream(connection: FakeStreamConnection, timer: FakeTimer,
@@ -324,6 +348,27 @@ export default function timelineStreamContractTest() {
       expect(listener.httpDisconnects[0]).assertEqual(401);
       expect(stream.stateValue()).assertEqual(TimelineStreamState.STOPPED);
     });
+
+    it('closed_lease_on_retry_fire_does_not_escape', 0, () => {
+      const connection: FakeStreamConnection = new FakeStreamConnection();
+      const timer: FakeTimer = new FakeTimer();
+      const listener: RecordingTimelineListener = new RecordingTimelineListener();
+      const gate: LeaseGate = new LeaseGate();
+      const stream: TimelineStream = makeGatedStream(connection, timer, listener, gate);
+      stream.start();
+
+      // 断流 → 1s 退避已武装；期间监视器把共用的 client 关成 CLOSED。
+      connection.emitEnded(200);
+      gate.open = false;
+      // 定时器到点：旧实现在这里把异常抛过 setTimeout 边界 → 进程被杀
+      // （真机 04:19 那次 JS_ERROR 就是 timeline 流，不是投影流）。
+      timer.fire();
+
+      expect(listener.leaseUnavailables).assertEqual(1);
+      expect(stream.stateValue()).assertEqual(TimelineStreamState.STOPPED);
+      expect(timer.stopped).assertTrue();
+      expect(connection.count()).assertEqual(1);
+    });
   });
 
   describe('transcript_model_contract', () => {
@@ -462,6 +507,48 @@ export default function timelineStreamContractTest() {
       expect(toolStatusTone(tool!.toolState)).assertEqual('bad');
       expect(toolStatusTone('running')).assertEqual('running');
       expect(toolStatusTone('backgrounded')).assertEqual('other');
+    });
+
+    it('tool_body_washes_exec_envelope_and_escape_leftovers', 0, () => {
+      const BS: string = '\\'; // 一个反斜杠，避免测试里多层转义看花眼
+      const model: TranscriptModel = new TranscriptModel();
+      applyEvent(model, 30, blockOpenedEvent('round-0:tool:0', 'tool', 'open'));
+
+      // 真机 exec 回包：外层 JSON 信封，正文在 output 字段里又套一层转义。
+      const envelope: string = '{"status":"completed","exit_code":0,"output":"Name  Length'
+        + BS + 'r' + BS + 'n----  ------"}';
+      const done: Record<string, Object> = { 'tool_call_id': 'call_9', 'name': 'exec',
+        'state': 'completed', 'args_json': '{"path":"C:' + BS + BS + 'Users' + BS + BS + 'tsy3m"}',
+        'output': envelope, 'progress': '' };
+      applyEvent(model, 31, { 'type': 'tool_updated', 'block_id': 'round-0:tool:0',
+        'tool': done });
+
+      const tool: TranscriptRow | undefined = findRow(model.rowsRef(),
+        TranscriptRowKind.TOOL);
+      expect(tool !== undefined).assertTrue();
+      // 信封剥掉 + 字面 \r\n 落成真实换行：卡片按行预览，不再满屏 \n。
+      expect(tool!.outputText).assertEqual('Name  Length\n----  ------');
+      expect(countLines(tool!.outputText)).assertEqual(2);
+      // 转义反斜杠还原成单个（Windows 路径可读），且不再被当成换行前缀。
+      expect(tool!.argsText).assertEqual('{"path":"C:' + BS + 'Users' + BS + 'tsy3m"}');
+    });
+
+    it('escaped_backslash_before_n_stays_literal', 0, () => {
+      const BS: string = '\\';
+      const model: TranscriptModel = new TranscriptModel();
+      applyEvent(model, 30, blockOpenedEvent('round-0:tool:0', 'tool', 'open'));
+
+      // 文本里是「转义过的反斜杠 + n」（如正则/日志字面量），不是换行指令。
+      const raw: string = 'pattern A' + BS + BS + 'nB stays one line';
+      const done: Record<string, Object> = { 'tool_call_id': 'call_9', 'name': 'grep',
+        'state': 'completed', 'args_json': '', 'output': raw, 'progress': '' };
+      applyEvent(model, 31, { 'type': 'tool_updated', 'block_id': 'round-0:tool:0',
+        'tool': done });
+
+      const tool: TranscriptRow | undefined = findRow(model.rowsRef(),
+        TranscriptRowKind.TOOL);
+      expect(tool!.outputText).assertEqual('pattern A' + BS + 'nB stays one line');
+      expect(countLines(tool!.outputText)).assertEqual(1);
     });
 
     it('collapsed_tool_body_previews_three_lines', 0, () => {

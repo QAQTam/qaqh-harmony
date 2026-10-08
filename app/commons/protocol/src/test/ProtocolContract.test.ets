@@ -27,7 +27,8 @@ import {
 import { ProjectionPayload, TimelineInput, TimelineToolResult, TimelineDeltaBlock }
   from '../main/ets/wire/Payload';
 import { InteractionBody, AskModeWire } from '../main/ets/wire/InteractionBody';
-import { RingingSessionListEntry, pickPreferredSession }
+import { RingingSessionListEntry, pickPreferredSession, visibleSessions,
+  SESSION_LIST_WIRE_KEYS, SESSION_LIST_MODELED_KEYS, SESSION_LIST_NEVER_ON_WIRE_KEYS }
   from '../main/ets/wire/SessionList';
 import {
   RingingV2CommandEnvelope, RingingCommand, ControlCommands, ConversationCommands,
@@ -568,6 +569,73 @@ export default function protocolContractTest() {
       const emptyTitle: RingingSessionListEntry = RingingSessionListEntry.parseArray(
         '[{"session_id":"0123456789abcdef","title":"","cwd":"/tmp/ws/"}]')[0];
       expect(emptyTitle.displayTitle()).assertEqual('ws');
+    });
+
+    it('session_list_wire_keys_mirror_backend_lock_table', 0, () => {
+      // 后端 qaqh-types 的 session_list_entry_wire_keys_are_locked 是本表唯一的
+      // 权威源；两侧各自「显式过一次评审」，任何一侧悄悄漂走都要在这里响。
+      const sorted: string = SESSION_LIST_WIRE_KEYS.slice(0).sort().join(',');
+      expect(sorted).assertEqual(
+        'archived,cache_reported_requests,compact_covered_through_msg_id,compact_skip,' +
+        'context_stats,created_at,custom_tools,cwd,effort,ephemeral,frozen_annotation,' +
+        'last_summary,last_usage,message_count,mode,model,profile,running,session_id,' +
+        'skills,title,tool_mode,turn_count,updated_at,usage_requests,usage_totals,' +
+        'workspace_id');
+      expect(SESSION_LIST_WIRE_KEYS.length).assertEqual(27);
+      // 建模键必须都在表内（加了字段忘了登记 = 锁表失效）。
+      for (const key of SESSION_LIST_MODELED_KEYS) {
+        expect(SESSION_LIST_WIRE_KEYS.includes(key)).assertTrue();
+      }
+      // 后端 #[serde(skip)] 的运行期字段：永不出线，也不许被认成有效键。
+      for (const key of SESSION_LIST_NEVER_ON_WIRE_KEYS) {
+        expect(SESSION_LIST_WIRE_KEYS.includes(key)).assertFalse();
+      }
+    });
+
+    it('session_list_archived_and_ephemeral_stay_out_of_active_surfaces', 0, () => {
+      // 后端 list_sessions 不过滤（归档会话照发），且 set_archived 会把
+      // updated_at 刷成当下——不过滤就等于让刚归档那条恒占「最新」位。
+      const entries: RingingSessionListEntry[] = RingingSessionListEntry.parseArray(
+        '[{"session_id":"old","updated_at":10},' +
+        '{"session_id":"arch","updated_at":99,"running":true,"archived":true},' +
+        '{"session_id":"sub","updated_at":98,"ephemeral":true},' +
+        '{"session_id":"live","updated_at":20,"running":true}]');
+      // 旧 meta 缺键 = 未归档/非临时（后端 #[serde(default)] 同语义）。
+      expect(entries[0].archived).assertFalse();
+      expect(entries[0].ephemeral).assertFalse();
+      expect(entries[1].archived).assertTrue();
+      expect(entries[2].ephemeral).assertTrue();
+      expect(entries[1].isListable()).assertFalse();
+      expect(entries[2].isListable()).assertFalse();
+      expect(entries[3].isListable()).assertTrue();
+      expect(visibleSessions(entries).length).assertEqual(2);
+      // running 优先只在可展示会话里成立。
+      expect(pickPreferredSession(entries)).assertEqual('live');
+      // 全归档/全临时 → 空串（与「无可见会话」同一路径）。
+      expect(pickPreferredSession(RingingSessionListEntry.parseArray(
+        '[{"session_id":"a","archived":true},{"session_id":"b","ephemeral":true}]')))
+        .assertEqual('');
+    });
+
+    it('session_list_drift_keys_are_recorded_not_fatal', 0, () => {
+      // 表内（已知未建模）收下不留痕；表外（后端未经评审的新键）记进
+      // unmodeledKeys——绝不让整条流/整张列表作废。
+      const entry: RingingSessionListEntry = RingingSessionListEntry.parseArray(
+        '[{"session_id":"s1","updated_at":5,"model":"m",' +
+        '"usage_totals":{"prompt_tokens":1},"skills":{"version":2},' +
+        '"subagent_of":"p1","tokens":8}]')[0];
+      expect(entry.sessionId).assertEqual('s1');
+      expect(entry.running).assertFalse();
+      expect(entry.unmodeledKeys.length).assertEqual(2);
+      expect(entry.unmodeledKeys[0]).assertEqual('subagent_of');
+      expect(entry.unmodeledKeys[1]).assertEqual('tokens');
+      // 全表条目 = 零漂移。
+      const clean: RingingSessionListEntry = RingingSessionListEntry.parseArray(
+        '[{"session_id":"s1","archived":false,"ephemeral":false,"cwd":"/tmp",' +
+        '"title":"t","workspace_id":null,"running":true}]')[0];
+      expect(clean.unmodeledKeys.length).assertEqual(0);
+      // workspace_id 未分组是 null 而非缺键（后端历史形状），解析为 undefined。
+      expect(clean.workspaceId).assertUndefined();
     });
 
     it('pairing_wire_parses_and_validates', 0, () => {

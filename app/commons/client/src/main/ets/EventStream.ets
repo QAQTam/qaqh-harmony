@@ -43,6 +43,11 @@ export interface EventStreamListener {
   onProtocolError(error: ProtocolError): void;
   /** `ringing.stream_terminated`：租约被撤销/过期，服务端单帧后断流。 */
   onStreamTerminated(terminated: RingingV2StreamTerminated): void;
+  /**
+   * 到点重连时租约已不在 open（端点组不出来）：本流已停止，
+   * 恢复归 SessionMonitor 的重新协商循环。
+   */
+  onLeaseUnavailable(): void;
 }
 
 export class EventStream {
@@ -108,11 +113,26 @@ export class EventStream {
   }
 
   private connect(): void {
+    if (this.stopped) {
+      // 陈旧回调兜底：stop() 解武装与已排程的 fire 之间存在竞态。
+      return;
+    }
+    // 端点必须在武装看门狗之前组好：connect 由 setTimeout 回调直接调用，异常
+    // 越过 napi 边界就是未捕获错误，框架直接杀进程（真机 M14 闪退：
+    // invalid_state requires open state, got closed）。
+    let endpoint: StreamEndpoint;
+    try {
+      endpoint = this.endpointFactory();
+    } catch (error) {
+      void (error as Error);
+      this.stop();
+      this.listener.onLeaseUnavailable();
+      return;
+    }
     this.decoder = new SseDecoder();
     this.setState(this.state === StreamState.CONNECTED
       ? StreamState.CONNECTED : StreamState.CONNECTING);
     this.armWatchdog();
-    const endpoint: StreamEndpoint = this.endpointFactory();
     this.connection.connect(
       new StreamRequest(endpoint.baseUrl + this.url(), endpoint.headers),
       new StreamPump(this));

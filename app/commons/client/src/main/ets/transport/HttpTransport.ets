@@ -26,7 +26,8 @@ export class HttpTransport implements Transport {
           ? http.RequestMethod.POST : http.RequestMethod.GET,
         expectDataType: http.HttpDataType.STRING,
         connectTimeout: this.connectTimeoutMs,
-        readTimeout: this.readTimeoutMs,
+        readTimeout: request.timeoutMs > 0
+          ? Math.min(this.readTimeoutMs, request.timeoutMs) : this.readTimeoutMs,
         header: request.headers
       };
       if (request.body.length > 0) {

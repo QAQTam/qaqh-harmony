@@ -42,6 +42,14 @@ export class LeaseLostReason {
  * 会烧掉两个节拍）：瞬时失败 2s 快速重试，连续 3 次才判死——TTL 30s 窗口内
  * 能吸收 6s+ 的连续抖动，且判死时仍有余量。 */
 export const MAX_RENEW_FAILURES: number = 3;
+
+/**
+ * 续期请求自己的读超时（对齐安卓 RingingConnection.kt 对 BUG-2026-09-13-09 的
+ * 修法）。服务端 TTL 30s / 建议节拍 10s，而 RPC 传输层为容纳大正文快照配到
+ * 120s——一次挂起的 renew 会静默烧穿整个 TTL 窗口（`renewing` 门还会挡住后续
+ * 节拍），回来就是 401 lease_expired + 归属被 expire 连带清掉。
+ */
+export const RENEW_REQUEST_TIMEOUT_MS: number = 10000;
 /** 瞬时失败后的快速重试间隔（ms）：不等完整节拍，在 TTL 窗口内密集补救。 */
 export const RENEW_RETRY_MS: number = 2000;
 
@@ -192,7 +200,7 @@ export class RingingClient {
     this.renewing = true;
     try {
       const response: TransportResponse = await this.sendJson(
-        'POST', renewLeasePath(), this.sessionHeaders(), '');
+        'POST', renewLeasePath(), this.sessionHeaders(), '', RENEW_REQUEST_TIMEOUT_MS);
       const parsed: RingingV2LeaseRenewResponse = RingingV2LeaseRenewResponse.parse(response.body);
       if (!parsed.ok) {
         this.leaseLost(LeaseLostReason.REJECTED);
@@ -455,9 +463,9 @@ export class RingingClient {
   }
 
   private async sendJson(method: string, path: string,
-    headers: Record<string, string>, body: string): Promise<TransportResponse> {
+    headers: Record<string, string>, body: string, timeoutMs?: number): Promise<TransportResponse> {
     const response: TransportResponse = await this.config.transport.send(
-      new TransportRequest(method, this.config.baseUrl + path, headers, body));
+      new TransportRequest(method, this.config.baseUrl + path, headers, body, timeoutMs));
     if (response.status < 200 || response.status >= 300) {
       const excerpt: string = response.body.length > 200
         ? response.body.substring(0, 200) : response.body;
