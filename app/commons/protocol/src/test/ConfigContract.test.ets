@@ -110,6 +110,13 @@ export default function configContractTest() {
       expectProtocolError('missing_field', () => RingingConfigDto.parse(LEGACY_PROVIDER_KEYS));
     });
 
+    it('config_dto_malformed_json_is_protocol_error', 0, () => {
+      // 响亮失败策略：畸形 JSON 与顶层非对象一律 ProtocolError('bad_json')，
+      // 不能漏出裸 SyntaxError（调用方按 instanceof ProtocolError 判断）。
+      expectProtocolError('bad_json', () => RingingConfigDto.parse('{"baseUrl":'));
+      expectProtocolError('bad_json', () => RingingConfigDto.parse('[]'));
+    });
+
     it('config_patch_serializes_only_set_fields', 0, () => {
       const patch: RingingConfigPatch = new RingingConfigPatch();
       expect(JSON.stringify(patch.toWire())).assertEqual('{}');

@@ -118,7 +118,14 @@ export class RingingSessionListEntry {
   }
 
   static parseArray(text: string): RingingSessionListEntry[] {
-    let value: Object = JSON.parse(text) as Object;
+    // 顶层是数组，parseJson（只收对象）不适用；但畸形 JSON 仍要按响亮失败策略
+    // 归一到 ProtocolError，别把 SyntaxError 漏给上层。
+    let value: Object;
+    try {
+      value = JSON.parse(text) as Object;
+    } catch (error) {
+      throw new ProtocolError('bad_json', `invalid JSON: ${(error as Error).message}`);
+    }
     if (!Array.isArray(value)) {
       throw new ProtocolError('bad_json', 'session.list response must be an array');
     }

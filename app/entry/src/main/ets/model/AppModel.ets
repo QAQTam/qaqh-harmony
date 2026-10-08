@@ -231,6 +231,8 @@ export class AppModel {
   private listEntries: RingingSessionListEntry[] = [];
   /** 表外键已告警过（15s 一轮，不刷屏）。 */
   private wireDriftNoted: boolean = false;
+  /** 通知发送失败已告警过（未授权时每次审批都会失败，不刷屏）。 */
+  private notifyWarned: boolean = false;
   /** 实况窗回合胶囊的本地边沿标记（与 AppStorage TURN_ACTIVE 解耦，防漏 flip）。 */
   private turnLiveShown: boolean = false;
   private notifier: ApprovalNotifier = new ApprovalNotifier('com.qaqh.harmony',
@@ -285,6 +287,7 @@ export class AppModel {
     // 会随构建产物分发，且残留值会让"当前地址"看起来已经配置好。
     this.put(QaqhState.BASE_URL, '');
     this.put(QaqhState.STATUS, '未连接');
+    void this.notifier.ensureEnabled(context);
     store.prime().then(() => {
       const trust: TrustSettings = store.loadTrust();
       this.put(QaqhState.CA_PEM, trust.caCertPem);
@@ -946,7 +949,14 @@ export class AppModel {
     const body: InteractionBody | undefined =
       this.interactionBodies.get(item.interactionId);
     this.notifier.publishApproval(item, approvalSummary(item, body),
-      this.cardTitle(item, body));
+      this.cardTitle(item, body))
+      .catch((error: Error) => {
+        // 发不出去不能静默：多为用户未允许通知（授权框见 ensureEnabled）。
+        if (!this.notifyWarned) {
+          this.notifyWarned = true;
+          hilog.warn(HILOG_DOMAIN, HILOG_TAG, `审批通知发送失败：${error.message}`);
+        }
+      });
   }
 
   private cancelNotice(interactionId: string): void {

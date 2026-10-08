@@ -15,7 +15,8 @@ import {
   encodeTimelineCursor, parseTimelineCursor, timelineEventsPath, timelinePath,
   RingingV2TimelineFrame, TimelineBlockKind, TimelineEntry, TimelineEventType,
   TimelineSnapshotResponse, TimelineToolState, TimelineTurn, TimelineFailure,
-  TimelineFailureCode
+  TimelineFailureCode, TimelineTool, TimelineToolBody, TimelineToolBodyKind,
+  TimelineToolHeaderKind
 } from '../main/ets/wire/Timeline';
 
 const EPOCH: string = '814155bfa1808ab5c73a58512372e40c35039d960707f8421ba32a46e1099ffe';
@@ -224,6 +225,99 @@ export default function timelineContractTest() {
       const futureWire: Record<string, Object> = { 'code': 'quantum_flux', 'message': '?' };
       const future: TimelineFailure = new TimelineFailure(futureWire);
       expect(TimelineFailureCode.isKnownGateKind(future.code)).assertFalse();
+    });
+
+    // 类型化展示投影（跨仓展示契约 §3.3）。夹具取自真机会话快照的 tool.display，
+    // 就是此前被整块忽略、导致工具卡呈现裸 JSON 的那几个字段。
+    it('tool_display_projection_is_parsed_over_legacy_strings', 0, () => {
+      const header: Record<string, Object> = { 'kind': 'other', 'label': 'process check' };
+      const body: Record<string, Object> = {
+        'kind': 'text', 'text': 'process 15: running', 'truncated': false };
+      const metrics: Record<string, Object> = {
+        'elapsed_ms': 5, 'output_bytes': 217, 'retry_count': 0, 'user_initiated': false };
+      const outcome: Record<string, Object> = {
+        'state': 'succeeded', 'exit_code': 0, 'duration_ms': 5, 'output_bytes': 217,
+        'truncated': false };
+      const display: Record<string, Object> = {
+        'header': header, 'body': body, 'metrics': metrics, 'outcome': outcome };
+      // 扁平兜底槽：旧路径显示给用户的就是这一坨裸 JSON。
+      const wire: Record<string, Object> = {
+        'tool_call_id': 'call_process_1', 'name': 'process', 'state': 'succeeded',
+        'output': '{"id":15,"name":"pwsh.exe","status":"running"}', 'display': display };
+
+      const tool: TimelineTool = new TimelineTool(wire);
+      expect(tool.display !== undefined).assertTrue();
+      expect(tool.display!.header!.kind).assertEqual(TimelineToolHeaderKind.OTHER);
+      expect(tool.display!.header!.label).assertEqual('process check');
+      expect(tool.display!.body!.kind).assertEqual(TimelineToolBodyKind.TEXT);
+      expect(tool.display!.body!.text).assertEqual('process 15: running');
+      expect(tool.display!.body!.hasContent()).assertTrue();
+      expect(tool.display!.metrics!.elapsedMs).assertEqual(5);
+      expect(tool.resolvedExitCode()).assertEqual(0);
+    });
+
+    it('tool_display_streams_split_and_exit_code_precedence', 0, () => {
+      // streams：stdout/stderr 分离（扁平 output 里两者已拼接，拿不回来）。
+      const shellHeader: Record<string, Object> = { 'kind': 'shell', 'command': 'pwsh -c ls' };
+      const streamsBody: Record<string, Object> = {
+        'kind': 'streams', 'stdout': 'a.txt\n', 'stderr': 'warn\n', 'exit_code': 2,
+        'interleaved': false };
+      const streamsDisplay: Record<string, Object> = {
+        'header': shellHeader, 'body': streamsBody };
+      const streamsWire: Record<string, Object> = {
+        'tool_call_id': 'call_exec_1', 'name': 'exec', 'state': 'failed',
+        'output': '{"status":"completed","exit_code":2}', 'display': streamsDisplay };
+
+      const streams: TimelineToolBody = new TimelineTool(streamsWire).display!.body!;
+      expect(streams.kind).assertEqual(TimelineToolBodyKind.STREAMS);
+      expect(streams.stdout).assertEqual('a.txt\n');
+      expect(streams.stderr).assertEqual('warn\n');
+      expect(streams.exitCode).assertEqual(2);
+      expect(new TimelineTool(streamsWire).resolvedExitCode()).assertEqual(2);
+      expect(new TimelineTool(streamsWire).display!.header!.command).assertEqual('pwsh -c ls');
+
+      // 退出码优先级：body → 顶层槽 → outcome。
+      const textBody: Record<string, Object> = { 'kind': 'text', 'text': 'ok' };
+      const nineOutcome: Record<string, Object> = { 'state': 'succeeded', 'exit_code': 9 };
+      const textDisplay: Record<string, Object> = {
+        'body': textBody, 'outcome': nineOutcome };
+      const topOnly: Record<string, Object> = {
+        'tool_call_id': 'c', 'name': 'exec', 'state': 'succeeded', 'exit_code': 7,
+        'display': textDisplay };
+      expect(new TimelineTool(topOnly).resolvedExitCode()).assertEqual(7);
+
+      const outcomeOnly: Record<string, Object> = {
+        'tool_call_id': 'c', 'name': 'exec', 'state': 'succeeded',
+        'display': textDisplay };
+      expect(new TimelineTool(outcomeOnly).resolvedExitCode()).assertEqual(9);
+    });
+
+    it('tool_without_display_falls_back_to_legacy_fields', 0, () => {
+      // H16：display 缺失（自定义工具）必须完整回退扁平字段，不能丢块。
+      const legacy: Record<string, Object> = {
+        'tool_call_id': 'call_custom', 'name': 'custom_tool', 'state': 'succeeded',
+        'summary': 'did a thing', 'args_json': '{"x":1}', 'output': 'plain output',
+        'progress_stream': 'stderr', 'progress_bytes_total': 128, 'exit_code': 0
+      };
+      const tool: TimelineTool = new TimelineTool(legacy);
+      expect(tool.display === undefined).assertTrue();
+      expect(tool.output).assertEqual('plain output');
+      expect(tool.argsText).assertEqual('{"x":1}');
+      expect(tool.progressStream).assertEqual('stderr');
+      expect(tool.progressBytesTotal).assertEqual(128);
+      expect(tool.resolvedExitCode()).assertEqual(0);
+
+      // 未知 header/body 变体不得抛：收下、标 unknown、由展示端兜底。
+      const futureHeader: Record<string, Object> = { 'kind': 'quantum' };
+      const futureBody: Record<string, Object> = { 'kind': 'hologram', 'weird': true };
+      const futureDisplay: Record<string, Object> = {
+        'header': futureHeader, 'body': futureBody };
+      const future: Record<string, Object> = {
+        'tool_call_id': 'c', 'name': 'x', 'state': 'succeeded', 'display': futureDisplay };
+      const parsed: TimelineTool = new TimelineTool(future);
+      expect(parsed.display!.header!.kind).assertEqual('quantum');
+      expect(parsed.display!.body!.kind).assertEqual('hologram');
+      expect(parsed.display!.body!.hasContent()).assertFalse();
     });
   });
 }

@@ -203,6 +203,176 @@ export class TimelineFailure {
   }
 }
 
+/** header 变体判别（对齐 qaqh_domain::TimelineToolHeader 的 `kind`）。 */
+export class TimelineToolHeaderKind {
+  static readonly PATH: string = 'path';
+  static readonly SHELL: string = 'shell';
+  static readonly QUERY: string = 'query';
+  static readonly OTHER: string = 'other';
+  static readonly UNKNOWN: string = 'unknown';
+}
+
+/**
+ * 类型化标题投影（wire `tool.display.header`，serde tag = `kind`）。
+ *
+ * 后端已把「这是什么工具、对谁做了什么」算好：path 给文件与操作、shell 给命令、
+ * query 给检索式、other 给厂商自定义标签。展示端据此出标题，**不必再从
+ * `args_json` 里猜**（旧路径 toolVerbOf 那套动词表就是猜出来的）。
+ */
+export class TimelineToolHeader {
+  readonly kind: string;
+  readonly path: string;
+  readonly op: string;
+  readonly command: string;
+  readonly query: string;
+  readonly scope: string;
+  readonly label: string;
+
+  constructor(holder: object) {
+    this.kind = optionalString(holder, 'kind') ?? 'unknown';
+    this.path = optionalString(holder, 'path') ?? '';
+    this.op = optionalString(holder, 'op') ?? '';
+    this.command = optionalString(holder, 'command') ?? '';
+    this.query = optionalString(holder, 'query') ?? '';
+    this.scope = optionalString(holder, 'scope') ?? '';
+    this.label = optionalString(holder, 'label') ?? '';
+  }
+}
+
+/** body 变体判别（对齐 qaqh_domain::TimelineToolBody 的 `kind`）。 */
+export class TimelineToolBodyKind {
+  static readonly NONE: string = 'none';
+  static readonly TEXT: string = 'text';
+  static readonly DIFF: string = 'diff';
+  static readonly SHELL: string = 'shell';
+  static readonly STREAMS: string = 'streams';
+  static readonly SUBAGENT: string = 'subagent';
+  static readonly UNKNOWN: string = 'unknown';
+}
+
+/**
+ * 类型化正文投影（wire `tool.display.body`）。取代按字符串拆信封：
+ * `streams` 是 stdout/stderr 分离（旧扁平 `output` 里两者已被拼在一起）、
+ * `exit_code`/`truncated` 是权威值（旧路径只能从信封 JSON 里捞）。
+ */
+export class TimelineToolBody {
+  readonly kind: string;
+  readonly text: string;
+  readonly truncated: boolean;
+  readonly unified: string;
+  readonly output: string;
+  readonly exitCode: number | undefined;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly interleaved: boolean;
+  readonly name: string;
+  readonly sessionId: string;
+
+  constructor(holder: object) {
+    this.kind = optionalString(holder, 'kind') ?? TimelineToolBodyKind.UNKNOWN;
+    this.text = optionalString(holder, 'text') ?? '';
+    this.truncated = optionalBoolean(holder, 'truncated') ?? false;
+    this.unified = optionalString(holder, 'unified') ?? '';
+    this.output = optionalString(holder, 'output') ?? '';
+    this.exitCode = optionalNumber(holder, 'exit_code');
+    this.stdout = optionalString(holder, 'stdout') ?? '';
+    this.stderr = optionalString(holder, 'stderr') ?? '';
+    this.interleaved = optionalBoolean(holder, 'interleaved') ?? false;
+    this.name = optionalString(holder, 'name') ?? '';
+    this.sessionId = optionalString(holder, 'session_id') ?? '';
+  }
+
+  /** 是否携带可见正文（`none`/`subagent`/`diff` 之外的空壳返回 false）。 */
+  hasContent(): boolean {
+    if (this.kind === TimelineToolBodyKind.TEXT) {
+      return this.text.length > 0;
+    }
+    if (this.kind === TimelineToolBodyKind.SHELL) {
+      return this.output.length > 0;
+    }
+    if (this.kind === TimelineToolBodyKind.STREAMS) {
+      return this.stdout.length > 0 || this.stderr.length > 0;
+    }
+    if (this.kind === TimelineToolBodyKind.DIFF) {
+      return this.unified.length > 0;
+    }
+    return false;
+  }
+}
+
+/** 调用度量（wire `tool.display.metrics`）：耗时/字节/重试，展示端做副行元数据。 */
+export class TimelineToolMetrics {
+  readonly elapsedMs: number;
+  readonly outputBytes: number;
+  readonly retryCount: number;
+  readonly effectiveToolName: string;
+  readonly userInitiated: boolean;
+
+  constructor(holder: object) {
+    this.elapsedMs = optionalNumber(holder, 'elapsed_ms') ?? 0;
+    this.outputBytes = optionalNumber(holder, 'output_bytes') ?? 0;
+    this.retryCount = optionalNumber(holder, 'retry_count') ?? 0;
+    this.effectiveToolName = optionalString(holder, 'effective_tool_name') ?? '';
+    this.userInitiated = optionalBoolean(holder, 'user_initiated') ?? false;
+  }
+}
+
+/**
+ * 结构化终态（wire `tool.display.outcome`）。与 tool 层的 `state` 是同一事实的
+ * 两个投影（`state` 管流程、`outcome` 管结果），退出码优先级：body → 顶层槽 →
+ * outcome（对齐 TUI adapter 的取值顺序）。
+ */
+export class TimelineToolOutcome {
+  readonly state: string;
+  readonly exitCode: number | undefined;
+  readonly durationMs: number | undefined;
+  readonly outputBytes: number | undefined;
+  readonly truncated: boolean | undefined;
+
+  constructor(holder: object) {
+    this.state = optionalString(holder, 'state') ?? 'unknown';
+    this.exitCode = optionalNumber(holder, 'exit_code');
+    this.durationMs = optionalNumber(holder, 'duration_ms');
+    this.outputBytes = optionalNumber(holder, 'output_bytes');
+    this.truncated = optionalBoolean(holder, 'truncated');
+  }
+}
+
+/**
+ * 类型化展示投影（wire `tool.display`，跨仓展示契约 §3.3）。
+ *
+ * 后端保证：全部字段可选，未知 header/body 变体解析为 unknown，**缺失时客户端
+ * 完整回退旧扁平字段**（H16）。所以要按「display 优先、扁平兜底」消费，而不是
+ * 反过来从 `output` 字符串里拆结构——那是 display 出现之前的旧路径。
+ */
+export class TimelineToolDisplay {
+  readonly summary: string;
+  readonly diff: string;
+  readonly linesAdded: number;
+  readonly linesRemoved: number;
+  readonly header: TimelineToolHeader | undefined;
+  readonly body: TimelineToolBody | undefined;
+  readonly metrics: TimelineToolMetrics | undefined;
+  readonly outcome: TimelineToolOutcome | undefined;
+
+  constructor(holder: object) {
+    this.summary = optionalString(holder, 'summary') ?? '';
+    this.diff = optionalString(holder, 'diff') ?? '';
+    this.linesAdded = optionalNumber(holder, 'lines_added') ?? 0;
+    this.linesRemoved = optionalNumber(holder, 'lines_removed') ?? 0;
+    const headerObject: object | undefined = optionalObject(holder, 'header');
+    this.header = headerObject !== undefined ? new TimelineToolHeader(headerObject) : undefined;
+    const bodyObject: object | undefined = optionalObject(holder, 'body');
+    this.body = bodyObject !== undefined ? new TimelineToolBody(bodyObject) : undefined;
+    const metricsObject: object | undefined = optionalObject(holder, 'metrics');
+    this.metrics = metricsObject !== undefined
+      ? new TimelineToolMetrics(metricsObject) : undefined;
+    const outcomeObject: object | undefined = optionalObject(holder, 'outcome');
+    this.outcome = outcomeObject !== undefined
+      ? new TimelineToolOutcome(outcomeObject) : undefined;
+  }
+}
+
 function optionalFailure(holder: object, field: string): TimelineFailure | undefined {
   const raw: object | undefined = optionalObject(holder, field);
   return raw !== undefined ? new TimelineFailure(raw) : undefined;
@@ -220,6 +390,14 @@ export class TimelineTool {
   readonly progress: string;
   readonly progressTruncated: boolean;
   readonly failure: TimelineFailure | undefined;
+  /** 类型化展示投影；缺失 = 该工具未挂 display（自定义工具），展示端走扁平兜底。 */
+  readonly display: TimelineToolDisplay | undefined;
+  /** 进度流标识（`stdout` | `stderr`）：区分进行中输出来自哪个流。 */
+  readonly progressStream: string;
+  /** 本次调用累计观测字节（emitted + dropped）。 */
+  readonly progressBytesTotal: number;
+  /** 工具退出码顶层槽（body/outcome 之外的第三个投影）。 */
+  readonly exitCode: number | undefined;
 
   constructor(holder: object) {
     this.toolCallId = requiredString(holder, 'tool_call_id');
@@ -232,6 +410,29 @@ export class TimelineTool {
     this.progress = optionalString(holder, 'progress') ?? '';
     this.progressTruncated = optionalBoolean(holder, 'progress_truncated') ?? false;
     this.failure = optionalFailure(holder, 'failure');
+    const displayObject: object | undefined = optionalObject(holder, 'display');
+    this.display = displayObject !== undefined
+      ? new TimelineToolDisplay(displayObject) : undefined;
+    this.progressStream = optionalString(holder, 'progress_stream') ?? '';
+    this.progressBytesTotal = optionalNumber(holder, 'progress_bytes_total') ?? 0;
+    this.exitCode = optionalNumber(holder, 'exit_code');
+  }
+
+  /**
+   * 退出码：优先类型化 body → 顶层槽 → outcome（对齐 TUI adapter 的取值顺序，
+   * 三者是同一事实的三个投影，取先到者）。
+   */
+  resolvedExitCode(): number | undefined {
+    const display: TimelineToolDisplay | undefined = this.display;
+    if (display !== undefined && display.body !== undefined &&
+      display.body.exitCode !== undefined) {
+      return display.body.exitCode;
+    }
+    if (this.exitCode !== undefined) {
+      return this.exitCode;
+    }
+    return display !== undefined && display.outcome !== undefined
+      ? display.outcome.exitCode : undefined;
   }
 }
 

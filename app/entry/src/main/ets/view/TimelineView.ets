@@ -133,6 +133,7 @@ export struct TimelineView {
 }
 
 @Component
+@Reusable
 struct UserBubble {
   @ObjectLink vm: RowVm;
 
@@ -156,6 +157,7 @@ struct UserBubble {
 }
 
 @Component
+@Reusable
 struct AssistantText {
   @ObjectLink vm: RowVm;
 
@@ -198,6 +200,7 @@ struct AssistantText {
 }
 
 @Component
+@Reusable
 struct ThinkingCard {
   @ObjectLink vm: RowVm;
   onToggle: (rowId: string) => void = (rowId: string) => void rowId;
@@ -226,13 +229,24 @@ struct ThinkingCard {
             .width('100%')
         }
       } else if (!this.vm.expanded) {
+        // 折叠态也带信息：计数之外给首行（思考起手是什么），别只剩一个数字。
         Row({ space: 8 }) {
           SymbolGlyph($r('sys.symbol.lightbulb_1'))
             .fontSize(14)
             .fontColor([$r('sys.color.ohos_id_color_text_tertiary')])
-          Text(`已思考 · ${this.vm.lineCount} 行`)
-            .fontSize(13)
-            .fontColor($r('sys.color.ohos_id_color_text_secondary'))
+          if (this.vm.text.length > 0) {
+            Text(this.vm.text)
+              .fontSize(12)
+              .fontColor($r('sys.color.ohos_id_color_text_tertiary'))
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+          } else {
+            Blank()
+          }
+          Text(`${this.vm.lineCount} 行`)
+            .fontSize(11)
+            .fontColor($r('sys.color.ohos_id_color_text_tertiary'))
           Text('展开')
             .fontSize(11)
             .fontColor($r('sys.color.ohos_id_color_text_tertiary'))
@@ -269,7 +283,10 @@ struct ThinkingCard {
       }
     }
     .alignItems(HorizontalAlign.Start)
-    .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+    .padding({ left: 11, right: 14, top: 8, bottom: 8 })
+    // 与工具卡同构但更弱的一层骨架：中性发丝边条，读得出「这是一个块」。
+    .border({ width: { left: 3 },
+      color: { left: $r('sys.color.ohos_id_color_list_separator') } })
     .width('94%')
     .onClick(() => {
       this.onToggle(this.vm.rowId);
@@ -278,6 +295,7 @@ struct ThinkingCard {
 }
 
 @Component
+@Reusable
 struct ToolCard {
   @ObjectLink vm: RowVm;
   onToggle: (rowId: string) => void = (rowId: string) => void rowId;
@@ -288,7 +306,7 @@ struct ToolCard {
         SymbolGlyph(toolSymbol(this.vm.toolName))
           .fontSize(15)
           .fontColor([toneColor(this.vm.tone)])
-        Text(this.headerText())
+        Text(this.title())
           .fontSize(14)
           .fontWeight(FontWeight.Medium)
           .fontColor($r('sys.color.ohos_id_color_text_primary'))
@@ -301,12 +319,15 @@ struct ToolCard {
             .height(14)
             .color(toneColor('running'))
         }
-        Text(toneLabel(this.vm.tone))
-          .fontSize(11)
-          .fontColor($r('sys.color.ohos_id_color_text_primary_contrary'))
-          .padding({ left: 8, right: 8, top: 3, bottom: 3 })
-          .borderRadius($r('sys.float.ohos_id_corner_radius_default_s'))
-          .backgroundColor(toneColor(this.vm.tone))
+        // 成功是常态，不占视觉预算：只有「需要你注意的」态才给徽标。
+        if (this.vm.tone !== 'ok') {
+          Text(toneLabel(this.vm.tone))
+            .fontSize(11)
+            .fontColor(toneColor(this.vm.tone))
+            .padding({ left: 7, right: 7, top: 2, bottom: 2 })
+            .borderRadius($r('sys.float.ohos_id_corner_radius_default_s'))
+            .backgroundColor(toneBackground(this.vm.tone))
+        }
       }
       .width('100%')
 
@@ -321,6 +342,7 @@ struct ToolCard {
       }
 
       if (this.vm.bodyText.length > 0) {
+        // 卡内不再套第二层底色（§二：同层不叠同层），改用发丝线分区。
         Text(this.vm.bodyText)
           .fontSize(12)
           .fontFamily(MONO_FAMILY)
@@ -329,31 +351,49 @@ struct ToolCard {
           .maxLines(this.vm.expanded ? 60 : 3)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 6 })
-          .padding({ left: 8, right: 8, top: 6, bottom: 6 })
-          .backgroundColor($r('sys.color.ohos_id_color_list_card_bg'))
-          .borderRadius($r('sys.float.ohos_id_corner_radius_default_s'))
+          .padding({ top: 6 })
+          .border({ width: { top: 1 },
+            color: $r('sys.color.ohos_id_color_list_separator') })
           .width('100%')
           .transition(expandTransition())
       }
 
-      if (this.vm.hiddenLines > 0 || this.vm.expanded) {
-        Text(this.vm.expanded ? '收起' : `… +${this.vm.hiddenLines} 行（点击展开）`)
-          .fontSize(11)
-          .fontColor($r('sys.color.ohos_id_color_text_tertiary'))
-          .margin({ top: 4 })
+      if (this.vm.metaText.length > 0 || this.vm.hiddenLines > 0 || this.vm.expanded) {
+        Row({ space: 8 }) {
+          if (this.vm.metaText.length > 0) {
+            Text(this.vm.metaText)
+              .fontSize(11)
+              .fontColor($r('sys.color.ohos_id_color_text_tertiary'))
+              .fontFamily(MONO_FAMILY)
+          }
+          if (this.vm.hiddenLines > 0 || this.vm.expanded) {
+            Text(this.vm.expanded ? '收起' : `… +${this.vm.hiddenLines} 行`)
+              .fontSize(11)
+              .fontColor($r('sys.color.ohos_id_color_text_tertiary'))
+          }
+        }
+        .margin({ top: 4 })
       }
     }
     .alignItems(HorizontalAlign.Start)
-    .padding(12)
-    .borderRadius($r('sys.float.ohos_id_corner_radius_default_l'))
-    .border({ width: this.vm.tone === 'ok' ? 0 : 1,
-      color: this.vm.tone === 'ok' ? Color.Transparent : toneColor(this.vm.tone) })
-    .backgroundColor(toneBackground(this.vm.tone))
+    .padding({ left: 11, right: 12, top: 8, bottom: 8 })
+    .borderRadius($r('sys.float.ohos_id_corner_radius_default_s'))
+    // 语义色只落在左侧边条（§二「徽标、边线、进度位」），不再整卡铺底。
+    .border({ width: { left: 3 }, color: { left: toneColor(this.vm.tone) } })
+    .backgroundColor($r('sys.color.ohos_id_color_background'))
     .width('94%')
     .clickEffect({ level: ClickEffectLevel.LIGHT })
     .onClick(() => {
       this.onToggle(this.vm.rowId);
     })
+  }
+
+  /** 标题优先取类型化 header（display.header），缺失才回退工具名反推。 */
+  private title(): string {
+    if (this.vm.typedTitle.length > 0) {
+      return this.vm.tone === 'running' ? `${this.vm.typedTitle} 中…` : this.vm.typedTitle;
+    }
+    return this.headerText();
   }
 
   private headerText(): string {
@@ -408,6 +448,7 @@ function toolVerbOf(name: string): string {
 }
 
 @Component
+@Reusable
 struct ToolGroupCard {
   @ObjectLink vm: RowVm;
   onToggle: (rowId: string) => void = (rowId: string) => void rowId;
@@ -469,6 +510,7 @@ struct ToolGroupCard {
 }
 
 @Component
+@Reusable
 struct TodoCard {
   @ObjectLink vm: RowVm;
   onToggle: (rowId: string) => void = (rowId: string) => void rowId;
@@ -571,6 +613,7 @@ function statusColor(status: string): ResourceColor {
 }
 
 @Component
+@Reusable
 struct MarkerRow {
   @ObjectLink vm: RowVm;
 

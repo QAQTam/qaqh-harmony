@@ -504,6 +504,17 @@ export default function protocolContractTest() {
       expect(held.driverEpoch).assertEqual(4);
     });
 
+    it('malformed_json_surfaces_as_protocol_error_not_syntax_error', 0, () => {
+      // 响亮失败策略：畸形 JSON 一律 ProtocolError('bad_json')。裸 JSON.parse 会把
+      // SyntaxError 漏到调用方，上层的 `instanceof ProtocolError` 判断会漏掉它。
+      expectProtocolError('bad_json', () =>
+        RingingV2DriverClaimResponse.parse('{"accepted":'));
+      expectProtocolError('bad_json', () => RingingSessionListEntry.parseArray('['));
+      // 顶层形态不符同样归一到 bad_json（parseJson 的口径）。
+      expectProtocolError('bad_json', () => RingingV2DriverClaimResponse.parse('null'));
+      expectProtocolError('bad_json', () => RingingSessionListEntry.parseArray('{}'));
+    });
+
     it('interaction_body_ask_and_permission_parse', 0, () => {
       // ask 正文（interaction_body.rs 单一来源格式）。
       const ask: InteractionBody = InteractionBody.parse(

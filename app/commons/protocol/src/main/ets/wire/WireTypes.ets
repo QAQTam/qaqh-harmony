@@ -497,7 +497,7 @@ export class RingingV2DriverClaimResponse {
   }
 
   static parse(text: string): RingingV2DriverClaimResponse {
-    const holder: object = JSON.parse(text) as object;
+    const holder: object = parseJson(text);
     return new RingingV2DriverClaimResponse(
       requiredBoolean(holder, 'accepted'),
       optionalString(holder, 'holder'),

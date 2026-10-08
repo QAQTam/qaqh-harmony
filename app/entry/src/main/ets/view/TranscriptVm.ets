@@ -44,6 +44,12 @@ export class RowVm {
   bodyText: string = '';
   hiddenLines: number = 0;
 
+  /** 类型化投影落地文案（display.header/body）；非空即优先于上面那些扁平兜底字段。 */
+  typedTitle: string = '';
+  typedBody: string = '';
+  /** 元数据副行（耗时 · exit code），空串 = 不显示。 */
+  metaText: string = '';
+
   groupVerb: string = '';
   groupNoun: string = '';
   memberTargets: string[] = [];
@@ -97,6 +103,9 @@ export class RowVm {
     this.errorText = row.errorText;
     this.bodyText = row.bodyText;
     this.hiddenLines = row.hiddenLines;
+    this.typedTitle = row.typedTitle;
+    this.typedBody = row.typedBody;
+    this.metaText = row.metaText;
     this.groupVerb = row.groupVerb;
     this.groupNoun = row.groupNoun;
     if (row.members.length > 0 || this.memberTargets.length > 0) {

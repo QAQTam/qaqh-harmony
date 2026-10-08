@@ -10,7 +10,7 @@
  */
 
 import { notificationManager } from '@kit.NotificationKit';
-import { wantAgent, WantAgent } from '@kit.AbilityKit';
+import { wantAgent, WantAgent, common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { PendingInteractionView } from '@qaqh/client';
 import { InteractionBody } from '@qaqh/protocol';
@@ -38,6 +38,22 @@ export class ApprovalNotifier {
     } catch (error) {
       // 已存在等场景按可用处理，publish 时再失败会抛出真实错误。
       this.slotReady = true;
+    }
+  }
+
+  /**
+   * 通知授权（冷启一次）：未授权则弹系统授权框。不请求的话用户没允许通知，
+   * publish 会被系统拒掉，审批提醒就悄悄不出现。失败不阻断——缺通知不影响
+   * 审批闭环本身（publish 侧另有一次告警兜底）。
+   */
+  async ensureEnabled(context: common.UIAbilityContext): Promise<void> {
+    try {
+      if (await notificationManager.isNotificationEnabled()) {
+        return;
+      }
+      await notificationManager.requestEnableNotification(context);
+    } catch (error) {
+      // 用户在授权框里拒绝 / 系统不支持：静默，交给 publish 侧暴露。
     }
   }
 

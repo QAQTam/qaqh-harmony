@@ -19,7 +19,7 @@
  * （移动端暂无编辑面；读侧只验证存在性）。需要时再按后端 qaqh-config-api 补。
  */
 
-import { ProtocolError, requiredString, requiredStringAllowEmpty, requiredNumber,
+import { parseJson, requiredString, requiredStringAllowEmpty, requiredNumber,
   requiredBoolean, requiredObject, requiredStringArray, optionalString } from './Json';
 
 /** `wire` 值域（后端 `ConfigPatch::validate` 同域，非法值整包拒绝）。 */
@@ -125,11 +125,7 @@ export class RingingConfigDto {
   }
 
   static parse(text: string): RingingConfigDto {
-    let value: Object = JSON.parse(text) as Object;
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      throw new ProtocolError('bad_json', 'config.load response must be an object');
-    }
-    return new RingingConfigDto(value as object);
+    return new RingingConfigDto(parseJson(text));
   }
 
   /** `wire` 是否为后端认可的三值之一（展示前防御）。 */

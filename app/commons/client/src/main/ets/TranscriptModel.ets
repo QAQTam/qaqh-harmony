@@ -20,8 +20,116 @@
 
 import {
   TimelineBlock, TimelineEntry, TimelineEvent, TimelineRound, TimelineTool, TimelineTurn,
-  TimelineBlockKind, TimelineBlockState, TimelineTurnState, TimelineToolState
+  TimelineBlockKind, TimelineBlockState, TimelineTurnState, TimelineToolState,
+  TimelineToolHeader, TimelineToolBody, TimelineToolHeaderKind, TimelineToolBodyKind,
+  TimelineToolDisplay
 } from '@qaqh/protocol';
+
+/**
+ * 类型化标题 → 展示文案（wire `tool.display.header`）。
+ *
+ * 后端已经把「这是什么工具、对谁做了什么」算好了：path 给路径与操作、shell 给
+ * 命令、query 给检索式、other 给厂商标签。拿不到（display 缺失或 unknown 变体）
+ * 才回退 `toolVerbOf` 那套从工具名反推的古法。
+ */
+export function typedHeaderText(header: TimelineToolHeader | undefined): string {
+  if (header === undefined) {
+    return '';
+  }
+  if (header.kind === TimelineToolHeaderKind.PATH) {
+    return header.path.length > 0 ? `${pathOpLabel(header.op)} ${header.path}` : '';
+  }
+  if (header.kind === TimelineToolHeaderKind.SHELL) {
+    return header.command;
+  }
+  if (header.kind === TimelineToolHeaderKind.QUERY) {
+    return header.scope.length > 0
+      ? `搜索 ${header.query}（${header.scope}）` : `搜索 ${header.query}`;
+  }
+  if (header.kind === TimelineToolHeaderKind.OTHER) {
+    return header.label;
+  }
+  return '';
+}
+
+/** `TimelinePathOp` → 中文动作（展示面口径，与 TUI adapter 的语义一致）。 */
+export function pathOpLabel(op: string): string {
+  if (op === 'read') {
+    return '读取';
+  }
+  if (op === 'write') {
+    return '写入';
+  }
+  if (op === 'edit') {
+    return '编辑';
+  }
+  if (op === 'list') {
+    return '列出';
+  }
+  if (op === 'patch') {
+    return '修补';
+  }
+  if (op === 'delete') {
+    return '删除';
+  }
+  return '处理';
+}
+
+/**
+ * 类型化正文 → 展示文本（wire `tool.display.body`）。
+ *
+ * 这是取代「拆信封」的正路：`streams` 的 stdout/stderr 在扁平 `output` 里已经被
+ * 拼接过、再也分不开；`text` 直接就是给人看的一行话。空壳（none/subagent/
+ * diff 之外无正文）返回空串，调用方据此决定不渲染正文块。
+ */
+export function typedBodyText(body: TimelineToolBody | undefined): string {
+  if (body === undefined) {
+    return '';
+  }
+  if (body.kind === TimelineToolBodyKind.TEXT) {
+    return body.text;
+  }
+  if (body.kind === TimelineToolBodyKind.SHELL) {
+    return body.output;
+  }
+  if (body.kind === TimelineToolBodyKind.STREAMS) {
+    if (body.stderr.length === 0) {
+      return body.stdout;
+    }
+    if (body.stdout.length === 0) {
+      return body.stderr;
+    }
+    return `${body.stdout}\n${body.stderr}`;
+  }
+  if (body.kind === TimelineToolBodyKind.DIFF) {
+    return body.unified;
+  }
+  return '';
+}
+
+/**
+ * 工具卡元数据副行（耗时 / 退出码）。只在 `display.metrics` 到场时才有内容——
+ * 扁平字段里没有这两个数，宁可不显示也不猜。
+ */
+function toolMetaText(tool: TimelineTool | undefined): string {
+  if (tool === undefined) {
+    return '';
+  }
+  const display: TimelineToolDisplay | undefined = tool.display;
+  const parts: string[] = [];
+  if (display !== undefined && display.metrics !== undefined && display.metrics.elapsedMs > 0) {
+    parts.push(formatDuration(display.metrics.elapsedMs));
+  }
+  const exit: number | undefined = tool.resolvedExitCode();
+  if (exit !== undefined) {
+    parts.push(`exit ${exit}`);
+  }
+  return parts.join(' · ');
+}
+
+function formatDuration(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+}
 
 /** 行类别（渲染分派用）。 */
 export class TranscriptRowKind {
@@ -408,6 +516,12 @@ export class TranscriptRow {
   bodySrc: string = '';
   /** 预览形态位（bit0 展开 / bit1 进行态）：与 bodySrc 一起定位上次算出的预览。 */
   bodyVariant: number = -1;
+
+  // 类型化展示投影（wire tool.display）的落地文案：非空即优先于扁平兜底。
+  typedTitle: string = '';
+  typedBody: string = '';
+  /** 元数据副行（耗时/字节/退出码），空串 = 不显示。 */
+  metaText: string = '';
 
   // toolGroup
   groupVerb: string = '';
@@ -1024,6 +1138,11 @@ export class TranscriptModel {
         ? `${tool.failure.code}: ${tool.failure.message}` : '';
       row.progressText = block.progress;
       row.diffText = tool !== undefined ? tool.diff : '';
+      // 类型化投影优先（H16：display 缺失才回退上面那些扁平字段）。
+      const display = tool !== undefined ? tool.display : undefined;
+      row.typedTitle = typedHeaderText(display !== undefined ? display.header : undefined);
+      row.typedBody = typedBodyText(display !== undefined ? display.body : undefined);
+      row.metaText = toolMetaText(tool);
       if (kind === TranscriptRowKind.TODO) {
         if (row.rowId === this.lastTodoRowId) {
           // 最后一条计划卡 = 实时清单（todo_update 折叠进面板后就地更新）。
@@ -1044,9 +1163,10 @@ export class TranscriptModel {
         row.touch();
         return;
       }
-      this.fillToolBody(row, block.progress.length > 0 ? row.progressText
-        : row.outputText.length > 0 ? row.outputText
-          : row.errorText.length > 0 ? row.errorText : row.diffText,
+      this.fillToolBody(row, row.typedBody.length > 0 ? row.typedBody :
+        block.progress.length > 0 ? row.progressText
+          : row.outputText.length > 0 ? row.outputText
+            : row.errorText.length > 0 ? row.errorText : row.diffText,
         tool !== undefined && isEditTool(tool.name));
     } else {
       row.text = block.text.length > 0 ? block.text : `[${block.kind} 待补]`;
