@@ -401,6 +401,14 @@ export class TranscriptRow {
   bodyText: string = '';
   hiddenLines: number = 0;
 
+  // 派生文本的入参指纹：结构重建会在同一批 tool 实例上重跑 fillBlockRow，
+  // 指纹未变（同一字符串实例）就跳过清洗/预览的全文重算——见 fillBlockRow/fillToolBody。
+  argsSrc: string = '';
+  outputSrc: string = '';
+  bodySrc: string = '';
+  /** 预览形态位（bit0 展开 / bit1 进行态）：与 bodySrc 一起定位上次算出的预览。 */
+  bodyVariant: number = -1;
+
   // toolGroup
   groupVerb: string = '';
   groupNoun: string = '';
@@ -450,6 +458,11 @@ class BlockView {
   /** 被拆组后单独显示（不许再回组——TUI「展开即拆组」语义）。 */
   soloExpanded: boolean = false;
 
+  /** todo 清单解析缓存：同一 args 文本（tool 实例未换）不重复 JSON.parse。 */
+  private todoArgsSrc: string | undefined = undefined;
+  private todoParsed: TodoItemView[] | undefined = undefined;
+  private todoParsedReady: boolean = false;
+
   constructor(block: TimelineBlock) {
     this.blockId = block.blockId;
     this.kind = block.kind;
@@ -458,6 +471,19 @@ class BlockView {
     this.text = '';
     this.tool = block.tool;
     this.setText(block.text);
+  }
+
+  /** 本块的 todo 清单（非 todo 族 / 畸形入参返回 undefined）。按 args 文本记忆化。 */
+  todoItems(): TodoItemView[] | undefined {
+    const src: string = this.tool !== undefined && isTodoTool(this.tool.name)
+      ? this.tool.argsText : '';
+    if (this.todoParsedReady && src === this.todoArgsSrc) {
+      return this.todoParsed;
+    }
+    this.todoArgsSrc = src;
+    this.todoParsedReady = true;
+    this.todoParsed = src.length === 0 ? undefined : parseTodoItems(src);
+    return this.todoParsed;
   }
 
   /** 流式追加：行数只数增量换行，全文扫描不进热路径。 */
@@ -673,7 +699,7 @@ export class TranscriptModel {
           continue;
         }
         if (tool.name === 'todo_write') {
-          const items: TodoItemView[] | undefined = parseTodoItems(tool.argsText);
+          const items: TodoItemView[] | undefined = block.todoItems();
           if (items !== undefined) {
             panel.length = 0;
             for (const item of items) {
@@ -714,9 +740,7 @@ export class TranscriptModel {
       this.turns[t].orderedBlocks(blocks);
       for (let b = blocks.length - 1; b >= 0; b--) {
         const block: BlockView = blocks[b];
-        if (block.kind === TimelineBlockKind.TOOL && block.tool !== undefined &&
-          isTodoTool(block.tool.name) &&
-          parseTodoItems(block.tool.argsText) !== undefined) {
+        if (block.kind === TimelineBlockKind.TOOL && block.todoItems() !== undefined) {
           return blockRowId(this.turns[t].turnId, block.blockId);
         }
       }
@@ -959,12 +983,8 @@ export class TranscriptModel {
       return TranscriptRowKind.THINKING;
     }
     if (block.kind === TimelineBlockKind.TOOL) {
-      const tool: TimelineTool | undefined = block.tool;
-      if (tool !== undefined && isTodoTool(tool.name) &&
-        parseTodoItems(tool.argsText) !== undefined) {
-        return TranscriptRowKind.TODO;
-      }
-      return TranscriptRowKind.TOOL;
+      return block.todoItems() !== undefined
+        ? TranscriptRowKind.TODO : TranscriptRowKind.TOOL;
     }
     if (block.kind === TimelineBlockKind.NOTICE) {
       return TranscriptRowKind.NOTICE;
@@ -988,8 +1008,18 @@ export class TranscriptModel {
       row.toolState = tool !== undefined ? tool.state : TimelineToolState.PREPARED;
       row.target = tool !== undefined
         ? toolTarget(tool.name, tool.summary, tool.argsText) : '';
-      row.argsText = TranscriptModel.washToolBody(tool !== undefined ? tool.argsText : '');
-      row.outputText = TranscriptModel.washToolBody(tool !== undefined ? tool.output : '');
+      // 清洗是多趟正则全文处理：结构重建会在同一 tool 实例上重跑，入参指纹
+      // 未变就沿用上次结果（工具正文/回包常在数十 KB 量级）。
+      const rawArgs: string = tool !== undefined ? tool.argsText : '';
+      if (rawArgs !== row.argsSrc) {
+        row.argsSrc = rawArgs;
+        row.argsText = TranscriptModel.washToolBody(rawArgs);
+      }
+      const rawOutput: string = tool !== undefined ? tool.output : '';
+      if (rawOutput !== row.outputSrc) {
+        row.outputSrc = rawOutput;
+        row.outputText = TranscriptModel.washToolBody(rawOutput);
+      }
       row.errorText = tool !== undefined && tool.failure !== undefined
         ? `${tool.failure.code}: ${tool.failure.message}` : '';
       row.progressText = block.progress;
@@ -999,8 +1029,7 @@ export class TranscriptModel {
           // 最后一条计划卡 = 实时清单（todo_update 折叠进面板后就地更新）。
           row.todoItems = this.todoPanel;
         } else {
-          const items: TodoItemView[] | undefined =
-            tool !== undefined ? parseTodoItems(tool.argsText) : undefined;
+          const items: TodoItemView[] | undefined = block.todoItems();
           row.todoItems = items !== undefined ? items : [];
         }
       }
@@ -1106,12 +1135,19 @@ export class TranscriptModel {
   /** 折叠预览：进行态取尾（滚动窗口），终态取头；展开态给全文。 */
   private fillToolBody(row: TranscriptRow, body: string, editTool: boolean): void {
     void editTool;
+    const variant: number = (row.expanded ? 1 : 0) |
+      (toolStatusTone(row.toolState) === 'running' ? 2 : 0);
+    if (row.bodySrc === body && row.bodyVariant === variant) {
+      return; // 同一正文 + 同一展示形态：预览已算过，不重复全文扫描。
+    }
+    row.bodySrc = body;
+    row.bodyVariant = variant;
     if (row.expanded) {
       row.bodyText = TranscriptModel.capToolBody(body);
       row.hiddenLines = 0;
       return;
     }
-    const running: boolean = toolStatusTone(row.toolState) === 'running';
+    const running: boolean = (variant & 2) !== 0;
     const shown: string = running ? tailLines(body, PREVIEW_LINES)
       : headLines(body, PREVIEW_LINES);
     row.bodyText = shown;
