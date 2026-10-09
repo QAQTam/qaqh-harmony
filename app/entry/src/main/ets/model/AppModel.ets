@@ -17,7 +17,7 @@ import {
   InteractionCenterListener, MonitorStatus, PendingInteractionView, PairingClient,
   PairingError, RingingClient, RingingClientConfig, RingingClientState, SessionMonitor,
   SessionMonitorListener, SystemLeaseTimer, StreamEndpoint, TimelineStream,
-  TimelineStreamListener, TranscriptModel, TlsTrust
+  TimelineStreamListener, TranscriptModel, TlsTrust, TodoItemStatus, TodoItemView
 } from '@qaqh/client';
 import {
   AskAnswer, ApprovalDecision, ConfigWire, ContentValueInline, ContentValueRef,
@@ -233,8 +233,6 @@ export class AppModel {
   private wireDriftNoted: boolean = false;
   /** 通知发送失败已告警过（未授权时每次审批都会失败，不刷屏）。 */
   private notifyWarned: boolean = false;
-  /** 实况窗回合胶囊的本地边沿标记（与 AppStorage TURN_ACTIVE 解耦，防漏 flip）。 */
-  private turnLiveShown: boolean = false;
   private notifier: ApprovalNotifier = new ApprovalNotifier('com.qaqh.harmony',
     'EntryAbility');
   private liveView: LiveViewNotifier = new LiveViewNotifier('com.qaqh.harmony',
@@ -720,8 +718,7 @@ export class AppModel {
     this.put(QaqhState.ACTIVE_TITLE, '');
     this.put(QaqhState.ACTIVE_MODEL, '');
     this.put(QaqhState.TURN_ACTIVE, false);
-    this.turnLiveShown = false;
-    // stop() 收两条实况窗（审批 + 回合），审批提醒走通知不受影响。
+    // stop() 收两条实况窗（审批 + Todo 进度），审批提醒走通知不受影响。
     this.liveView.stop();
   }
 
@@ -1435,14 +1432,36 @@ export class AppModel {
 
   private flushNow(): void {
     this.setStatus();
-    const turnActive: boolean = this.transcript.turnActiveValue();
-    this.put(QaqhState.TURN_ACTIVE, turnActive);
-    // 实况窗「电脑正在干活」胶囊：只在状态翻转时触碰（流式期间 flush 很频）。
-    if (turnActive !== this.turnLiveShown) {
-      this.turnLiveShown = turnActive;
-      void this.liveView.updateTurnActive(turnActive,
-        turnActive ? '回合进行中，点按查看' : '');
+    this.put(QaqhState.TURN_ACTIVE, this.transcript.turnActiveValue());
+    this.pushTodoLiveView();
+  }
+
+  /**
+   * 实况窗 Todo 进度窗：每次 flush 都推，去重交给 LiveViewNotifier 的内容指纹。
+   *
+   * 原先这里挂的是 turnActive 边沿标记，两处都不对——标记要在每条收窗路径上
+   * 手工同步（disconnect() 就漏了，于是重连后永不触发），而「回合在跑」本身
+   * 没有可展示的进度，todo 面板的 done/total 才有。
+   */
+  private pushTodoLiveView(): void {
+    const items: TodoItemView[] = this.transcript.todoPanelItems();
+    let done: number = 0;
+    let running: string = '';
+    let next: string = '';
+    for (const item of items) {
+      if (item.status === TodoItemStatus.COMPLETED) {
+        done++;
+        continue;
+      }
+      if (next.length === 0) {
+        next = item.title;
+      }
+      if (running.length === 0 && item.status === TodoItemStatus.IN_PROGRESS) {
+        running = item.title;
+      }
     }
+    void this.liveView.updateTodoProgress(items.length, done,
+      running.length > 0 ? running : next);
   }
 
   /** 更早的历史：`before_index` 深翻页，接到已渲条目前面。 */
